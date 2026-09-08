@@ -347,7 +347,11 @@ async function doProtect() {
     const fd = new FormData();
     fd.append('file', file);
 
-    const r = await fetch('/api/protect', { method: 'POST', body: fd });
+    const r = await fetch('/api/index', {
+      method: 'POST',
+      body: fd,
+      headers: { 'X-Original-URL': '/api/protect' }
+    });
 
     if (r.ok) {
       const blob    = await r.blob();

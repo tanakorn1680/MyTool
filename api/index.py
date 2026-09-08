@@ -49,6 +49,8 @@ def _dispatch():
     path = (
         request.environ.get("HTTP_X_ORIGINAL_URL") or
         request.environ.get("HTTP_X_REWRITE_URL") or
+        request.headers.get("X-Original-URL") or
+        request.headers.get("X-Rewrite-URL") or
         request.environ.get("PATH_INFO") or "/"
     ).split("?")[0].rstrip("/") or "/"
 
