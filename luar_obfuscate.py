@@ -81,6 +81,9 @@ def obfuscate_bytecode(src: bytes) -> bytes:
     mr_str         = _to_mr(enc)
     chunks, inv    = _chunk_shuffle(mr_str, rng)
     n_chunks       = len(chunks)
+    # order[inv[o]] = o  →  buf[order[i]] = chunks[i]  →  correct reassemble
+    order = [0]*n_chunks
+    for o in range(n_chunks): order[inv[o]] = o
 
     L = []  # lines ทั้งหมด
 
@@ -146,15 +149,15 @@ def obfuscate_bytecode(src: bytes) -> bytes:
         if rng.random() < 0.3:
             e(f"-- {_rng_str(rng,20)}")
 
-    # ── inverse order ────────────────────────────────────────────────────
-    vInv = N()
-    e(f"local {vInv} = {{{','.join(str(x+1) for x in inv)}}}")
+    # ── order table (buf[order[i]] = chunks[i] → correct reassemble) ────
+    vOrd = N()
+    e(f"local {vOrd} = {{{','.join(str(x+1) for x in order)}}}")
 
     # ── reassemble ───────────────────────────────────────────────────────
     vBuf = N(); vMR = N(); vi = N()
     e(f"local {vBuf} = {{}}")
     e(f"for {vi}=1,{n_chunks} do")
-    e(f"  {vBuf}[{vInv}[{vi}]] = {vChunks}[{vi}]")
+    e(f"  {vBuf}[{vOrd}[{vi}]] = {vChunks}[{vi}]")
     e(f"end")
     e(f"local {vMR} = table.concat({vBuf})")
 
