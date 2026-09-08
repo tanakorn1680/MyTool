@@ -1,0 +1,11 @@
+{
+  "functions": {
+    "api/protect.py": { "maxDuration": 30 },
+    "api/run.py":     { "maxDuration": 30 }
+  },
+  "rewrites": [
+    { "source": "/api/protect", "destination": "/api/protect.py" },
+    { "source": "/api/run",     "destination": "/api/run.py" },
+    { "source": "/(.*)",        "destination": "/public/index.html" }
+  ]
+}
