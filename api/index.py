@@ -1,83 +1,86 @@
-import sys, io
+import sys, io, tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from flask import Flask, request, send_file, jsonify
-from luar_obfuscate import obfuscate_bytecode
+from luar_compiler import compile_lua
+from luar_crypto import protect_payload, unprotect_payload, AuthenticationError
+from luar_format import pack_luar, unpack_luar, FormatError
+from luar_runtime import execute_instructions, LuaRuntimeError
 
-STATIC = Path(__file__).parent / "static"
-app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
+app = Flask(__name__, static_folder="static", static_url_path="")
 
 
-def _do_protect():
+@app.route("/api/protect", methods=["POST"])
+def protect():
     f = request.files.get("file")
     if not f:
         return jsonify(error="No file uploaded."), 400
 
-    raw = f.read()
-    if len(raw) == 0:
-        return jsonify(error="File is empty."), 400
-
+    source = f.read().decode("utf-8", errors="replace")
     try:
-        result = obfuscate_bytecode(raw)
-    except Exception as e:
-        return jsonify(error=f"Obfuscation error: {e}"), 400
-
-    stem = Path(f.filename).stem if f.filename else "protected"
-    resp = send_file(
-        io.BytesIO(result),
-        mimetype="application/octet-stream",
-        as_attachment=True,
-        download_name=stem + ".lua",
-    )
-    resp.headers["Content-Disposition"] = f'attachment; filename="{stem}.lua"'
-    resp.headers["X-Content-Type-Options"] = "nosniff"
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
-
-
-def _serve_index():
-    index_file = STATIC / "index.html"
-    if not index_file.exists():
-        return jsonify(error="index.html not found"), 500
-    return send_file(str(index_file))
-
-
-def _dispatch():
-    path = (
-        request.environ.get("HTTP_X_ORIGINAL_URL") or
-        request.environ.get("HTTP_X_REWRITE_URL") or
-        request.headers.get("X-Original-URL") or
-        request.headers.get("X-Rewrite-URL") or
-        request.environ.get("PATH_INFO") or "/"
-    ).split("?")[0].rstrip("/") or "/"
-
-    try:
-        if path == "/api/protect" and request.method == "POST":
-            return _do_protect()
-        elif path == "/api/protect":
-            return jsonify(error="Method not allowed"), 405
-        else:
-            return _serve_index()
-    except Exception as e:
-        return jsonify(error=str(e)), 500
-
-
-# ── Routes ────────────────────────────────────────────────────────────────────
-@app.route("/api/protect", methods=["POST"])
-def protect():
-    try:
-        return _do_protect()
+        payload_bytes = compile_lua(source)
+        seed, ct, salt, nonce, tag = protect_payload(payload_bytes)
     except Exception as e:
         return jsonify(error=str(e)), 400
 
-@app.route("/api/index", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
-def vercel_entry():
-    return _dispatch()
+    with tempfile.NamedTemporaryFile(suffix=".luar", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    pack_luar(tmp_path, seed, salt, nonce, ct, tag)
+    data = tmp_path.read_bytes()
+    tmp_path.unlink(missing_ok=True)
+
+    return send_file(
+        io.BytesIO(data),
+        mimetype="application/octet-stream",
+        as_attachment=True,
+        download_name=Path(f.filename).stem + ".luar",
+    )
+
+
+@app.route("/api/run", methods=["POST"])
+def run():
+    f = request.files.get("file")
+    if not f:
+        return jsonify(error="No file uploaded."), 400
+
+    with tempfile.NamedTemporaryFile(suffix=".luar", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+        tmp_path.write_bytes(f.read())
+
+    try:
+        seed, salt, nonce, ct, tag = unpack_luar(tmp_path)
+    except FormatError as e:
+        return jsonify(error=f"Format error: {e}"), 400
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    try:
+        payload = unprotect_payload(ct, salt, nonce, tag, seed)
+    except AuthenticationError as e:
+        return jsonify(error=str(e)), 403
+
+    buf = io.StringIO()
+    sys.stdout, old = buf, sys.stdout
+    try:
+        execute_instructions(payload)
+    except LuaRuntimeError as e:
+        sys.stdout = old
+        return jsonify(error=f"Runtime error: {e}"), 400
+    except Exception as e:
+        sys.stdout = old
+        return jsonify(error=f"Unexpected error: {e}"), 500
+    finally:
+        sys.stdout = old
+
+    return jsonify(output=buf.getvalue())
+
 
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def index(path):
-    return _serve_index()
+    return app.send_static_file("index.html")
+
+
+handler = app
