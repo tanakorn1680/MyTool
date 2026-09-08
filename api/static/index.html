@@ -234,14 +234,14 @@ footer .sep { margin: 0 0.4rem; opacity: 0.4; }
 </header>
 
 <div class="card">
-  <div class="badge">🔑 Auto-seed · No password needed</div>
+  <div class="badge">🛡️ Multi-layer obfuscation · GG compatible</div>
 
   <div class="field">
-    <label for="file-protect">Lua Source (.lua)</label>
+    <label for="file-protect">Lua Script (.lua)</label>
     <div class="dropzone" id="dz-protect">
       <input type="file" id="file-protect" accept=".lua">
       <div class="dz-icon">📄</div>
-      <div class="dz-text">Drop .lua file here or click to browse</div>
+      <div class="dz-text">Drop .lua file (source or bytecode)</div>
       <div class="dz-filename" id="name-protect"></div>
     </div>
   </div>
@@ -255,11 +255,11 @@ footer .sep { margin: 0 0.4rem; opacity: 0.4; }
 </div>
 
 <footer>
-  AES-256-GCM + Scrypt
+  Rolling XOR + Chunk Shuffle
   <span class="sep">·</span>
-  Embedded seed
+  Variable Mangling
   <span class="sep">·</span>
-  LuaR v2
+  LuaR Obfuscator
 </footer>
 
 <script>
@@ -351,8 +351,8 @@ async function doProtect() {
 
     if (r.ok) {
       const blob    = await r.blob();
-      const outName = file.name.replace(/\.lua$/, '.luar');
-      showResult(true, 'Protected successfully. Seed embedded — no password needed to run.', blob, outName);
+      const outName = file.name.replace(/\.lua$/, '_ob.lua');
+      showResult(true, 'Obfuscated successfully. Run directly on GameGuardian.', blob, outName);
     } else {
       const j = await r.json();
       showResult(false, j.error || 'Unknown error.');
