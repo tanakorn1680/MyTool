@@ -1,7 +1,0 @@
-{
-  "rewrites": [
-    { "source": "/api/protect", "destination": "/api/protect" },
-    { "source": "/api/run",     "destination": "/api/run" },
-    { "source": "/(.*)",        "destination": "/public/index.html" }
-  ]
-}
