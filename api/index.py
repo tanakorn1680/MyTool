@@ -14,23 +14,26 @@ app = Flask(__name__)
 
 @app.route("/api/protect", methods=["POST"])
 def protect():
-    f    = request.files.get("file")
-    seed = request.form.get("seed", "").strip()
-    if not f:    return jsonify(error="No file uploaded."), 400
-    if not seed: return jsonify(error="Seed is required."), 400
+    f = request.files.get("file")
+    if not f:
+        return jsonify(error="No file uploaded."), 400
 
     source = f.read().decode("utf-8", errors="replace")
     try:
         payload = compile_lua(source)
-        ct, salt, nonce, tag = protect_payload(payload, seed)
+        ct, salt, nonce, tag, seed_hex = protect_payload(payload)
     except Exception as e:
         return jsonify(error=str(e)), 400
 
     with tempfile.NamedTemporaryFile(suffix=".luar", delete=False) as tmp:
         tmp_path = Path(tmp.name)
-    pack_luar(tmp_path, salt, nonce, ct, tag)
-    data = tmp_path.read_bytes()
-    tmp_path.unlink(missing_ok=True)
+
+    try:
+        # pack_luar embeds the seed inside the file — no seed needed at run time
+        pack_luar(tmp_path, salt, nonce, ct, tag, seed_hex)
+        data = tmp_path.read_bytes()
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
     return send_file(
         io.BytesIO(data),
@@ -42,26 +45,25 @@ def protect():
 
 @app.route("/api/run", methods=["POST"])
 def run():
-    f    = request.files.get("file")
-    seed = request.form.get("seed", "").strip()
-    if not f:    return jsonify(error="No file uploaded."), 400
-    if not seed: return jsonify(error="Seed is required."), 400
+    f = request.files.get("file")
+    if not f:
+        return jsonify(error="No file uploaded."), 400
 
     with tempfile.NamedTemporaryFile(suffix=".luar", delete=False) as tmp:
         tmp_path = Path(tmp.name)
         tmp_path.write_bytes(f.read())
 
     try:
-        salt, nonce, ct, tag = unpack_luar(tmp_path)
+        salt, nonce, ct, tag, seed_hex = unpack_luar(tmp_path)
     except FormatError as e:
         return jsonify(error=f"Format error: {e}"), 400
     finally:
         tmp_path.unlink(missing_ok=True)
 
     try:
-        payload = unprotect_payload(ct, salt, nonce, tag, seed)
+        payload = unprotect_payload(ct, salt, nonce, tag, seed_hex)
     except AuthenticationError:
-        return jsonify(error="Authentication failed — wrong seed or corrupted file."), 403
+        return jsonify(error="Authentication failed — file corrupted or tampered."), 403
 
     buf = io.StringIO()
     sys.stdout, old = buf, sys.stdout

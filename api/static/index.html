@@ -48,29 +48,6 @@ header h1 {
 
 header p { color: var(--muted); margin-top: 0.4rem; font-size: 0.875rem; }
 
-/* ── Tabs ── */
-.tabs { display: flex; gap: 0.5rem; margin-bottom: 1.25rem; }
-
-.tab {
-  padding: 0.5rem 1.25rem;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--muted);
-  font-family: var(--sans);
-  font-size: 0.875rem;
-  cursor: pointer;
-  transition: border-color 0.15s, color 0.15s, background 0.15s;
-}
-
-.tab:hover { border-color: #3d4255; color: var(--text); }
-
-.tab.active {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: rgba(124, 106, 247, 0.1);
-}
-
 /* ── Card ── */
 .card {
   width: 100%;
@@ -81,12 +58,8 @@ header p { color: var(--muted); margin-top: 0.4rem; font-size: 0.875rem; }
   padding: 1.75rem;
 }
 
-/* ── Panel ── */
-.panel { display: none; flex-direction: column; gap: 1.1rem; }
-.panel.active { display: flex; }
-
 /* ── Field ── */
-.field { display: flex; flex-direction: column; gap: 0.4rem; }
+.field { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 1.1rem; }
 
 label {
   font-size: 0.72rem;
@@ -94,25 +67,6 @@ label {
   letter-spacing: 0.07em;
   color: var(--muted);
   font-weight: 600;
-}
-
-/* ── Password input ── */
-input[type="password"] {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  font-family: var(--mono);
-  font-size: 0.875rem;
-  padding: 0.6rem 0.85rem;
-  outline: none;
-  width: 100%;
-  transition: border-color 0.15s, box-shadow 0.15s;
-}
-
-input[type="password"]:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(124, 106, 247, 0.15);
 }
 
 /* ── Dropzone ── */
@@ -164,7 +118,6 @@ input[type="password"]:focus {
   font-size: 0.9rem;
   font-weight: 600;
   cursor: pointer;
-  align-self: flex-start;
   transition: opacity 0.15s, transform 0.1s;
 }
 
@@ -193,6 +146,7 @@ input[type="password"]:focus {
   border-radius: 10px;
   border: 1px solid var(--border);
   background: rgba(0, 0, 0, 0.18);
+  margin-top: 1.1rem;
 }
 
 .result.visible { display: flex; }
@@ -245,6 +199,20 @@ input[type="password"]:focus {
 
 .dl-btn:hover { background: rgba(91, 196, 245, 0.18); }
 
+/* ── Badge ── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.7rem;
+  color: var(--ok);
+  border: 1px solid rgba(52, 211, 153, 0.25);
+  border-radius: 20px;
+  padding: 0.2rem 0.6rem;
+  margin-bottom: 1.2rem;
+  background: rgba(52, 211, 153, 0.07);
+}
+
 /* ── Footer ── */
 footer {
   margin-top: 2.5rem;
@@ -262,87 +230,39 @@ footer .sep { margin: 0 0.4rem; opacity: 0.4; }
 
 <header>
   <h1>⟨ LuaR ⟩</h1>
-  <p>Lua Script Protector — local tool</p>
+  <p>Lua Script Protector</p>
 </header>
 
-<div class="tabs">
-  <button class="tab active" onclick="switchTab('protect', this)">🔒 Protect</button>
-  <button class="tab"        onclick="switchTab('run',     this)">▶ Run</button>
-</div>
-
 <div class="card">
+  <div class="badge">🔑 Auto-seed · No password needed</div>
 
-  <!-- ── Protect ── -->
-  <div id="panel-protect" class="panel active">
-
-    <div class="field">
-      <label for="file-protect">Lua Source (.lua)</label>
-      <div class="dropzone" id="dz-protect">
-        <input type="file" id="file-protect" accept=".lua">
-        <div class="dz-icon">📄</div>
-        <div class="dz-text">Drop .lua file here or click to browse</div>
-        <div class="dz-filename" id="name-protect"></div>
-      </div>
+  <div class="field">
+    <label for="file-protect">Lua Source (.lua)</label>
+    <div class="dropzone" id="dz-protect">
+      <input type="file" id="file-protect" accept=".lua">
+      <div class="dz-icon">📄</div>
+      <div class="dz-text">Drop .lua file here or click to browse</div>
+      <div class="dz-filename" id="name-protect"></div>
     </div>
-
-    <div class="field">
-      <label for="seed-protect">Seed (secret)</label>
-      <input type="password" id="seed-protect" placeholder="Enter your secret seed" autocomplete="off">
-    </div>
-
-    <button class="btn-primary" id="btn-protect" onclick="doProtect()">
-      <span class="spinner" id="spin-protect"></span>
-      <span id="lbl-protect">🔒 Protect</span>
-    </button>
-
-    <div class="result" id="res-protect"></div>
   </div>
 
-  <!-- ── Run ── -->
-  <div id="panel-run" class="panel">
+  <button class="btn-primary" id="btn-protect" onclick="doProtect()">
+    <span class="spinner" id="spin-protect"></span>
+    <span id="lbl-protect">🔒 Protect</span>
+  </button>
 
-    <div class="field">
-      <label for="file-run">Protected File (.luar)</label>
-      <div class="dropzone" id="dz-run">
-        <input type="file" id="file-run" accept=".luar">
-        <div class="dz-icon">🔐</div>
-        <div class="dz-text">Drop .luar file here or click to browse</div>
-        <div class="dz-filename" id="name-run"></div>
-      </div>
-    </div>
-
-    <div class="field">
-      <label for="seed-run">Seed (secret)</label>
-      <input type="password" id="seed-run" placeholder="Enter your secret seed" autocomplete="off">
-    </div>
-
-    <button class="btn-primary" id="btn-run" onclick="doRun()">
-      <span class="spinner" id="spin-run"></span>
-      <span id="lbl-run">▶ Run</span>
-    </button>
-
-    <div class="result" id="res-run"></div>
-  </div>
-
+  <div class="result" id="res-protect"></div>
 </div>
 
 <footer>
-  <code>localhost:5000</code>
-  <span class="sep">·</span>
   AES-256-GCM + Scrypt
   <span class="sep">·</span>
-  LuaR v1
+  Embedded seed
+  <span class="sep">·</span>
+  LuaR v2
 </footer>
 
 <script>
-// ── Tab switching ──────────────────────────────────────────────────────────
-function switchTab(name, el) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-  el.classList.add('active');
-  document.getElementById('panel-' + name).classList.add('active');
-}
-
 // ── Dropzone setup ─────────────────────────────────────────────────────────
 function setupDZ(dzId, inputId, nameId, ext) {
   const dz    = document.getElementById(dzId);
@@ -368,22 +288,19 @@ function setupDZ(dzId, inputId, nameId, ext) {
 }
 
 setupDZ('dz-protect', 'file-protect', 'name-protect', '.lua');
-setupDZ('dz-run',     'file-run',     'name-run',     '.luar');
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-function setLoading(panel, loading) {
-  const btn  = document.getElementById('btn-'  + panel);
-  const spin = document.getElementById('spin-' + panel);
-  const lbl  = document.getElementById('lbl-'  + panel);
-  btn.disabled        = loading;
-  spin.style.display  = loading ? 'inline-block' : 'none';
-  lbl.textContent     = loading
-    ? (panel === 'protect' ? 'Processing…' : 'Running…')
-    : (panel === 'protect' ? '🔒 Protect'   : '▶ Run');
+function setLoading(loading) {
+  const btn  = document.getElementById('btn-protect');
+  const spin = document.getElementById('spin-protect');
+  const lbl  = document.getElementById('lbl-protect');
+  btn.disabled       = loading;
+  spin.style.display = loading ? 'inline-block' : 'none';
+  lbl.textContent    = loading ? 'Processing…' : '🔒 Protect';
 }
 
-function showResult(id, ok, msg, dlUrl, dlName, output) {
-  const el = document.getElementById(id);
+function showResult(ok, msg, dlUrl, dlName) {
+  const el = document.getElementById('res-protect');
   el.className = 'result visible ' + (ok ? 'ok' : 'err');
 
   const title = ok ? (dlUrl ? 'Protected' : 'Success') : 'Error';
@@ -391,9 +308,8 @@ function showResult(id, ok, msg, dlUrl, dlName, output) {
     <div class="dot ${ok ? 'ok' : 'err'}"></div>${title}
   </div>`;
 
-  if (msg)    html += `<pre>${esc(msg)}</pre>`;
-  if (output) html += `<pre>${esc(output)}</pre>`;
-  if (dlUrl)  html += `<a class="dl-btn" href="${dlUrl}" download="${dlName}">⬇ Download ${dlName}</a>`;
+  if (msg)   html += `<pre>${esc(msg)}</pre>`;
+  if (dlUrl) html += `<a class="dl-btn" href="${dlUrl}" download="${dlName}">⬇ Download ${dlName}</a>`;
 
   el.innerHTML = html;
 }
@@ -408,17 +324,12 @@ function esc(s) {
 // ── Protect ────────────────────────────────────────────────────────────────
 async function doProtect() {
   const file = document.getElementById('file-protect').files[0];
-  const seed = document.getElementById('seed-protect').value.trim();
-  const res  = 'res-protect';
+  if (!file) return showResult(false, 'No file selected.');
 
-  if (!file) return showResult(res, false, 'No file selected.');
-  if (!seed) return showResult(res, false, 'Seed is required.');
-
-  setLoading('protect', true);
+  setLoading(true);
   try {
     const fd = new FormData();
     fd.append('file', file);
-    fd.append('seed', seed);
 
     const r = await fetch('/api/protect', { method: 'POST', body: fd });
 
@@ -426,45 +337,15 @@ async function doProtect() {
       const blob    = await r.blob();
       const outName = file.name.replace(/\.lua$/, '.luar');
       const url     = URL.createObjectURL(blob);
-      showResult(res, true, 'Protected successfully.', url, outName);
+      showResult(true, 'Protected successfully. Seed embedded — no password needed to run.', url, outName);
     } else {
       const j = await r.json();
-      showResult(res, false, j.error || 'Unknown error.');
+      showResult(false, j.error || 'Unknown error.');
     }
   } catch (e) {
-    showResult(res, false, e.message);
+    showResult(false, e.message);
   } finally {
-    setLoading('protect', false);
-  }
-}
-
-// ── Run ────────────────────────────────────────────────────────────────────
-async function doRun() {
-  const file = document.getElementById('file-run').files[0];
-  const seed = document.getElementById('seed-run').value.trim();
-  const res  = 'res-run';
-
-  if (!file) return showResult(res, false, 'No file selected.');
-  if (!seed) return showResult(res, false, 'Seed is required.');
-
-  setLoading('run', true);
-  try {
-    const fd = new FormData();
-    fd.append('file', file);
-    fd.append('seed', seed);
-
-    const r = await fetch('/api/run', { method: 'POST', body: fd });
-    const j = await r.json();
-
-    if (r.ok) {
-      showResult(res, true, null, null, null, j.output || '(no output)');
-    } else {
-      showResult(res, false, j.error || 'Unknown error.');
-    }
-  } catch (e) {
-    showResult(res, false, e.message);
-  } finally {
-    setLoading('run', false);
+    setLoading(false);
   }
 }
 </script>
