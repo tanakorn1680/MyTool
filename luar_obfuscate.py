@@ -1,213 +1,383 @@
 """
-LuaR Obfuscator v2
-รับ Lua bytecode (หรือ source) → output Lua script ที่รันบน GG ได้
-แต่อ่าน/แกะยากมาก
+LuaR Obfuscator v3 — ULTRA MODE
+Input:  raw bytes (Lua source หรือ bytecode ก็ได้)
+Output: Lua source ที่รันบน GG ได้ แต่อ่าน/แกะแทบเป็นไปไม่ได้
 
-Layers:
-  1. Rolling XOR (256-byte key derived from random seed)
-  2. Chunk reorder (chunks สับตำแหน่ง, decode ตอน run ด้วย index table)
-  3. Seed split (seed 4 bytes กระจายใน dead code ไม่อยู่ติดกัน)
-  4. Variable name mangling (ชื่อตัวแปรสุ่ม hex-like)
-  5. Dead code injection (ตัวแปรปลอม, math ไม่มีผล)
-  6. String split (hex data แบ่งเป็น chunks สั้นๆ สุ่มขนาด)
+Pipeline encoding:
+  1. Fibonacci-Diffusion XOR  — key stateful, ขึ้นอยู่กับ ciphertext ก่อนหน้า
+  2. Mixed-Radix Encoding     — base-17/base-31 สลับตาม position; ไม่เป็น hex
+  3. Chunk Shuffle            — ชิ้นสับตำแหน่ง, reassemble ด้วย inverse index table
+
+Anti-reversing layers (ไม่กระทบ logic):
+  A. Unicode Look-alike Names — ชื่อ vars มี Cyrillic/Greek ผสม, grep/copy fail
+  B. Opaque Predicates        — if-conditions ที่คำนวณซับซ้อนแต่ผลตาย true/false
+  C. Phantom Functions        — functions ปลอมที่ถูก define+เรียก ใน dead branch
+  D. Bogus GG API Ghosts      — pcall(gg.*) ที่ fail silently แต่ confuse analyzer
+  E. Time-Lock Tautology      — os.time() check ที่ดูเหมือน expiry แต่ always true
+  F. String Micro-Splitting   — strings แต่ละ chunk แบ่งเป็นชิ้น 8-20 chars concat
+  G. Dead Code Injection      — math/bitwise/string ops ที่ไม่มีผล คั่น logic จริง
 """
 
-import os, random, struct, hashlib
+import os
+import random
+import struct
+import hashlib
 
-# ── Name pool ──────────────────────────────────────────────────────────────
-def _mangle(seed_int):
+# ── Base alphabets for mixed-radix ─────────────────────────────────────────
+_B17 = '0123456789abcdefg'          # 17 chars
+_B31 = '0123456789abcdefghijklmnopqrstu'   # 31 chars  (28*9=252≥256 for hi)
+
+# ── Unicode look-alike map (Cyrillic/Greek that look like ASCII) ────────────
+_LOOKALIKE = {
+    'a': ['а', 'ɑ'],   # Cyrillic а, Latin alpha
+    'e': ['е', 'ε'],   # Cyrillic е, Greek epsilon
+    'o': ['о', 'ο'],   # Cyrillic о, Greek omicron
+    'c': ['с'],        # Cyrillic с
+    'p': ['р'],        # Cyrillic р
+    'x': ['х'],        # Cyrillic х
+    'i': ['і'],        # Cyrillic і
+    'n': ['ν'],        # Greek nu
+    's': ['ѕ'],        # Cyrillic dze
+}
+
+def _make_namer(seed_int: int):
     rng = random.Random(seed_int)
     used = set()
+    pool = list('0123456789abcdef') + ['l', 'I', 'O', 'q']
+
     def name():
         while True:
-            n = "_" + "".join(rng.choice("0123456789abcdef") for _ in range(6))
-            if n not in used:
-                used.add(n)
-                return n
+            length = rng.randint(5, 8)
+            chars = []
+            for _ in range(length):
+                ch = rng.choice(pool)
+                if ch in _LOOKALIKE and rng.random() < 0.3:
+                    ch = rng.choice(_LOOKALIKE[ch])
+                chars.append(ch)
+            candidate = '_' + ''.join(chars)
+            if candidate not in used:
+                used.add(candidate)
+                return candidate
     return name
 
-# ── Rolling XOR ──────────────────────────────────────────────────────────────
-def _make_key(seed: int) -> bytes:
-    """256-byte key from seed via SHA-256 chain."""
-    h = hashlib.sha256(struct.pack(">I", seed)).digest()
-    key = h
-    while len(key) < 256:
-        h = hashlib.sha256(h).digest()
-        key += h
-    return key[:256]
 
-def _xor(data: bytes, key: bytes) -> bytes:
-    return bytes(data[i] ^ key[i % 256] for i in range(len(data)))
+# ── Fibonacci-Diffusion XOR (encode) ───────────────────────────────────────
+def _fib_xor_enc(data: bytes, fa: int, fb: int, pv: int, golden: int = 0x9E) -> bytes:
+    out = bytearray()
+    for i, byte in enumerate(data):
+        k = (fa ^ pv ^ ((i * golden) & 0xFF)) & 0xFF
+        ct = byte ^ k
+        out.append(ct)
+        fa, fb = fb, (fa + fb + (ct & 0x0F)) % 251
+        pv = ct
+    return bytes(out)
 
-# ── Chunk + reorder ──────────────────────────────────────────────────────────
-def _chunk_and_shuffle(hex_str: str, rng: random.Random):
-    """Split hex string into variable-size chunks, shuffle, return (chunks, order)."""
-    i, chunks = 0, []
-    while i < len(hex_str):
-        size = rng.randint(200, 600) * 2  # 100-300 bytes per chunk (hex chars)
-        size = min(size, len(hex_str) - i)
-        # ensure even number of chars
-        if size % 2: size += 1
-        if size == 0: break
-        chunks.append(hex_str[i:i+size])
-        i += size
 
+# ── Mixed-Radix Encode ──────────────────────────────────────────────────────
+def _to_mr(data: bytes) -> str:
+    r = []
+    for i, b in enumerate(data):
+        if i % 2 == 0:
+            r += [_B17[b // 17], _B17[b % 17]]
+        else:
+            r += [_B31[b // 28], _B31[b % 28]]
+    return ''.join(r)
+
+
+# ── Chunk Shuffle ───────────────────────────────────────────────────────────
+def _chunk_shuffle(s: str, rng: random.Random):
+    chunks = []
+    i = 0
+    while i < len(s):
+        sz = rng.randint(120, 320) * 2
+        sz = min(sz, len(s) - i)
+        if sz % 2 == 1:
+            sz += 1
+        if sz == 0:
+            break
+        chunks.append(s[i:i+sz])
+        i += sz
     order = list(range(len(chunks)))
     rng.shuffle(order)
-    shuffled = [chunks[order[i]] for i in range(len(chunks))]
-    # inverse permutation: where does each shuffled slot go?
+    shuffled = [chunks[order[j]] for j in range(len(chunks))]
     inv = [0] * len(order)
-    for i, o in enumerate(order):
-        inv[o] = i
+    for j, o in enumerate(order):
+        inv[o] = j
     return shuffled, inv
 
-# ── Dead code ──────────────────────────────────────────────────────────────
-def _dead_lines(rng: random.Random, names, count=8):
+
+# ── Dead random string ──────────────────────────────────────────────────────
+def _rstr(rng, n):
+    return ''.join(rng.choice('abcdefghijklmnopqrstuvwxyz0123456789') for _ in range(n))
+
+
+# ── Dead code lines ─────────────────────────────────────────────────────────
+def _dead(rng, N, count=5):
     ops = [
-        lambda: f"local {names()} = {rng.randint(1,9999)} * {rng.randint(1,9999)}",
-        lambda: f"local {names()} = ({rng.randint(1,255)} ~ {rng.randint(1,255)})",
-        lambda: f"local {names()} = string.len(\"{_rand_str(rng, 6)}\")",
-        lambda: f"local {names()} = math.floor({rng.uniform(1,999):.4f})",
-        lambda: f"-- {_rand_str(rng, 12)}",
+        lambda: f"local {N()} = {rng.randint(1,9999)} * {rng.randint(1,9999)} - {rng.randint(1,999)}",
+        lambda: f"local {N()} = ({rng.randint(1,255)} | {rng.randint(1,255)}) & 0xff",
+        lambda: f"local {N()} = math.floor({rng.uniform(0.001, 999.9):.5f})",
+        lambda: f"local {N()} = string.len(\"{_rstr(rng, rng.randint(4,10))}\")",
+        lambda: f"-- {''.join(rng.choice('0123456789abcdef') for _ in range(rng.randint(12,28)))}",
+        lambda: f"local {N()} = {rng.randint(1,99)} ~ {rng.randint(1,99)}",
     ]
     return [rng.choice(ops)() for _ in range(count)]
 
-def _rand_str(rng, n):
-    return "".join(rng.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(n))
 
-# ── Seed split: hide 4-byte seed across 4 dead variables ──────────────────
-def _seed_vars(seed: int, rng: random.Random, names):
-    """Return (lines_to_insert, reconstruct_expr)."""
-    b = struct.pack(">I", seed)
-    vnames = [names() for _ in range(4)]
-    lines = [f"local {vnames[i]} = {b[i]}" for i in range(4)]
-    # reconstruct: (v0<<24)|(v1<<16)|(v2<<8)|v3
-    expr = (f"({vnames[0]}*16777216)"
-            f"+({vnames[1]}*65536)"
-            f"+({vnames[2]}*256)"
-            f"+{vnames[3]}")
-    return lines, expr, vnames
+# ── Opaque predicates ───────────────────────────────────────────────────────
+def _op_true(rng):
+    n = rng.randint(1, 999)
+    tpl = rng.randint(0, 3)
+    if tpl == 0: return f"({n} * {n} - {n*n-1} == 1)"
+    if tpl == 1:
+        b = rng.randint(2, 40)
+        return f"({rng.randint(100,999)} % {b} < {b})"
+    if tpl == 2: return "(64 % 7 == 1)"
+    return f"(({rng.randint(0,255)} | 1) >= 1)"
 
-# ── Main obfuscate ──────────────────────────────────────────────────────────
+def _op_false(rng):
+    n = rng.randint(1, 999)
+    tpl = rng.randint(0, 2)
+    if tpl == 0: return f"({n} == {n+1})"
+    if tpl == 1:
+        a = rng.randint(2, 50)
+        return f"({a*a} < {a})"
+    return "(1 == 2)"
+
+
+# ── Phantom functions (dead branches) ──────────────────────────────────────
+def _phantoms(rng, N, count=3):
+    lines = []
+    for _ in range(count):
+        fn = N(); a = N(); b = N(); rv = N()
+        v1 = rng.randint(1, 999); v2 = rng.randint(1, 999)
+        lines += [
+            f"local function {fn}({a}, {b})",
+            f"  return {a} + {b} * {rng.randint(1,7)}",
+            f"end",
+            f"if {_op_false(rng)} then",
+            f"  local {rv} = {fn}({v1}, {v2})",
+            f"end",
+        ]
+    return lines
+
+
+# ── Bogus GG API ghosts ─────────────────────────────────────────────────────
+def _gg_ghosts(rng, N):
+    calls = [
+        'gg.getTargetPackage()',
+        'gg.getRanges(gg.REGION_C_HEAP)',
+        'gg.searchNumber("0", gg.TYPE_DWORD)',
+        'gg.getResults(1)',
+        'gg.clearResults()',
+    ]
+    chosen = rng.sample(calls, k=3)
+    lines = []
+    for c in chosen:
+        lines.append(f"local {N()} = pcall(function() return {c} end)")
+    return lines
+
+
+# ── Time-lock tautology ─────────────────────────────────────────────────────
+def _timelock(rng, N):
+    mod = rng.randint(100, 9999); add = rng.randint(1, 99)
+    t = N(); ck = N()
+    return [
+        f"local {t} = os.time()",
+        f"local {ck} = ({t} % {mod}) + {add} >= {add}",
+        f"if not {ck} then return end",
+    ]
+
+
+# ── Micro-split a string into short concat pieces ──────────────────────────
+def _split_str(s: str, rng, N, lines_out):
+    """Write 'local <var> = <many short strings concatenated>' into lines_out, return var name."""
+    tbl = N(); out_var = N()
+    lines_out.append(f"local {tbl} = {{}}")
+    i = 0; idx = 1
+    while i < len(s):
+        sz = rng.randint(8, 22)
+        sz = min(sz, len(s) - i)
+        piece = s[i:i+sz]
+        escaped = piece.replace('\\', '\\\\').replace('"', '\\"')
+        lines_out.append(f'{tbl}[{idx}] = "{escaped}"')
+        if rng.random() < 0.25:
+            lines_out.append(f"local {N()} = {rng.randint(1,999)}")
+        i += sz; idx += 1
+    lines_out.append(f"local {out_var} = table.concat({tbl})")
+    return out_var
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PUBLIC: obfuscate_bytecode
+# ═══════════════════════════════════════════════════════════════════════════
+
 def obfuscate_bytecode(bytecode: bytes) -> bytes:
     """
-    Input:  raw Lua bytecode (or any binary to protect)
-    Output: Lua source (.lua) that decodes + loads itself at runtime
+    Input:  bytes (Lua source or bytecode)
+    Output: obfuscated Lua source bytes, runnable on GameGuardian Lua
     """
-    seed = struct.unpack(">I", os.urandom(4))[0]
+    seed = struct.unpack('>Q', os.urandom(8))[0]
     rng  = random.Random(seed)
-    N    = _mangle(rng.randint(0, 0xFFFFFFFF))
+    N    = _make_namer(rng.randint(0, 0xFFFFFFFF))
+    golden = 0x9E
 
-    key     = _make_key(seed)
-    xored   = _xor(bytecode, key)
-    hex_str = xored.hex()
+    # Init Fibonacci state (random)
+    fa = rng.randint(1, 200)
+    fb = rng.randint(1, 200)
+    pv = rng.randint(0, 255)
 
-    chunks, inv_order = _chunk_and_shuffle(hex_str, rng)
-    n_chunks = len(chunks)
+    # ── Encode pipeline ──────────────────────────────────────────────────
+    enc    = _fib_xor_enc(bytecode, fa, fb, pv, golden)
+    mr_str = _to_mr(enc)
+    shuffled_chunks, inv_order = _chunk_shuffle(mr_str, rng)
+    n_chunks = len(shuffled_chunks)
 
-    seed_lines, seed_expr, _ = _seed_vars(seed, rng, N)
+    # ── Build Lua source ─────────────────────────────────────────────────
+    L = []  # lines
 
-    # Variable names for runtime
-    v_chunks  = N()   # table holding shuffled chunks
-    v_inv     = N()   # inverse order table
-    v_key     = N()   # key bytes table
-    v_buf     = N()   # reassembly buffer
-    v_hex     = N()   # final hex string
-    v_xored   = N()   # xored bytes table
-    v_out     = N()   # output bytes table
-    v_i       = N()   # loop var
-    v_b       = N()   # byte var
-    v_k       = N()   # key var
-    v_fn      = N()   # loaded function
-    v_seed    = N()   # reconstructed seed
-    v_h       = N()   # hash chain var
-    v_t       = N()   # temp table for key
-    v_s       = N()   # sha256 helper result
-    v_c       = N()   # char var
+    # Decoy header
+    L += [
+        f"-- LuaR v{rng.randint(3,9)}.{rng.randint(0,9)}.{rng.randint(100,999)}",
+        f"-- build {rng.randint(100000,999999)} "
+        f"checksum {format(rng.randint(0, 0xFFFFFFFF), '08x')}",
+        f"-- {_rstr(rng, 40)}",
+    ]
 
-    # Build chunk assignments
-    chunk_lines = []
-    for idx, chunk in enumerate(chunks):
-        # split each chunk into 2-4 sub-pieces for extra obfuscation
-        sub_pieces = []
-        ci = 0
-        while ci < len(chunk):
-            sub_len = rng.randint(80, 200)
-            sub_len = min(sub_len, len(chunk) - ci)
-            if sub_len % 2: sub_len = max(2, sub_len - 1)
-            sub_pieces.append('"' + chunk[ci:ci+sub_len] + '"')
-            ci += sub_len
-        chunk_lines.append(f"{v_chunks}[{idx+1}] = " + "..".join(sub_pieces))
+    # Bogus GG ghosts (confuse static analysis of gg.* usage)
+    L += _gg_ghosts(rng, N)
 
-    # Build inverse order table
+    # Time-lock tautology
+    L += _timelock(rng, N)
+
+    # Dead block 1
+    L += _dead(rng, N, 5)
+
+    # Phantom functions in dead branches
+    L += _phantoms(rng, N, 3)
+
+    # Dead block 2
+    L += _dead(rng, N, 4)
+
+    # ── Chunk table ──────────────────────────────────────────────────────
+    v_chunks = N()
+    L.append(f"local {v_chunks} = {{}}")
+
+    for idx, chunk in enumerate(shuffled_chunks):
+        sub_var = _split_str(chunk, rng, N, L)
+        L.append(f"{v_chunks}[{idx+1}] = {sub_var}")
+        if rng.random() < 0.35:
+            L += _dead(rng, N, 2)
+
+    # ── Inverse order table ──────────────────────────────────────────────
+    v_inv = N()
     inv_parts = ",".join(str(x+1) for x in inv_order)
+    L.append(f"local {v_inv} = {{{inv_parts}}}")
 
-    # Dead code scattered
-    dead1 = _dead_lines(rng, N, 6)
-    dead2 = _dead_lines(rng, N, 5)
-    dead3 = _dead_lines(rng, N, 4)
+    # Dead block 3
+    L += _dead(rng, N, 4)
 
-    # ── SHA-256 in pure Lua for key derivation ──────────────────────────────
-    # Too complex to embed — use simpler key: derive from seed via linear congruential
-    # Key = [((seed * i * 0x5851f42d + 0xc4ceb9fe) >> 8) & 0xFF for i in 1..256]
-    # This is fast in Lua and hard to reverse without knowing the constants
-    A = 0x5851f42d
-    B = 0xc4ceb9fe
-
-    lines = []
-
-    # Header comment (decoy)
-    lines += [
-        f"-- v{rng.randint(1,9)}.{rng.randint(0,99)}.{rng.randint(0,999)}",
-        f"-- build {rng.randint(10000,99999)}",
-    ]
-
-    # Seed split
-    lines += dead1[:2]
-    lines += seed_lines
-    lines += dead1[2:]
-
-    # Reconstruct seed
-    lines.append(f"local {v_seed} = {seed_expr}")
-
-    # Build key table from seed
-    lines += dead2[:2]
-    lines += [
-        f"local {v_t} = {{}}",
-        f"local {v_k} = {v_seed}",
-        f"for {v_i}=1,256 do",
-        f"  {v_k} = ({v_k} * {A} + {B}) & 0xffffffff",
-        f"  {v_t}[{v_i}] = ({v_k} >> 8) & 0xff",
+    # Anti-debug opaque trap
+    L += [
+        f"if {_op_false(rng)} then",
+        f"  local {N()} = nil",
         f"end",
     ]
-    lines += dead2[2:]
 
-    # Chunk table
-    lines.append(f"local {v_chunks} = {{}}")
-    lines += chunk_lines
-
-    # Inverse order
-    lines.append(f"local {v_inv} = {{{inv_parts}}}")
-
-    # Reassemble in correct order
-    lines += dead3
-    lines += [
+    # ── Reassemble chunks in correct order ───────────────────────────────
+    v_buf = N(); v_mr = N(); v_loop = N()
+    L += [
         f"local {v_buf} = {{}}",
-        f"for {v_i}=1,{n_chunks} do",
-        f"  {v_buf}[{v_inv}[{v_i}]] = {v_chunks}[{v_i}]",
+        f"for {v_loop}=1,{n_chunks} do",
+        f"  {v_buf}[{v_inv}[{v_loop}]] = {v_chunks}[{v_loop}]",
         f"end",
-        f"local {v_hex} = table.concat({v_buf})",
+        f"local {v_mr} = table.concat({v_buf})",
     ]
 
-    # Decode hex + XOR
-    lines += [
-        f"local {v_out} = {{}}",
-        f"for {v_i}=1,#{v_hex},2 do",
-        f"  local {v_b} = tonumber({v_hex}:sub({v_i},{v_i}+1),16)",
-        f"  {v_out}[#{v_out}+1] = string.char({v_b} ~ {v_t}[({v_i}//2)%256+1])",
+    # ── Mixed-radix decode → byte array ─────────────────────────────────
+    v_b17 = N(); v_b31 = N()
+    v_raw = N(); v_ri  = N(); v_bi = N()
+
+    # Split the alphabet strings too (extra obfuscation)
+    b17_var = _split_str(_B17, rng, N, L)
+    b31_var = _split_str(_B31, rng, N, L)
+    L += [
+        f"local {v_b17} = {b17_var}",
+        f"local {v_b31} = {b31_var}",
+        f"local {v_raw} = {{}}",
+        f"local {v_ri}  = 1",
+        f"local {v_bi}  = 0",
+        f"local _mri = 1",
+        f"while _mri + 1 <= #{v_mr} do",
+        f"  if {v_bi} % 2 == 0 then",
+        f"    local _h = {v_b17}:find({v_mr}:sub(_mri,_mri),1,true)-1",
+        f"    local _l = {v_b17}:find({v_mr}:sub(_mri+1,_mri+1),1,true)-1",
+        f"    {v_raw}[{v_ri}] = string.char(_h*17+_l)",
+        f"  else",
+        f"    local _h = {v_b31}:find({v_mr}:sub(_mri,_mri),1,true)-1",
+        f"    local _l = {v_b31}:find({v_mr}:sub(_mri+1,_mri+1),1,true)-1",
+        f"    {v_raw}[{v_ri}] = string.char(_h*28+_l)",
+        f"  end",
+        f"  {v_ri} = {v_ri}+1",
+        f"  {v_bi} = {v_bi}+1",
+        f"  _mri = _mri+2",
         f"end",
-        f"local {v_fn} = load(table.concat({v_out}))",
-        f"if {v_fn} then {v_fn}() end",
     ]
 
-    return "\n".join(lines).encode("utf-8")
+    # Dead block 4
+    L += _dead(rng, N, 3)
+
+    # ── Fibonacci-Diffusion XOR decode ───────────────────────────────────
+    v_fa  = N(); v_fb  = N(); v_pv  = N()
+    v_dec = N(); v_ii  = N()
+    v_ct  = N(); v_k   = N(); v_pt  = N(); v_nfb = N()
+
+    L += [
+        f"local {v_fa} = {fa}",
+        f"local {v_fb} = {fb}",
+        f"local {v_pv} = {pv}",
+        f"local {v_dec} = {{}}",
+        f"for {v_ii}=1,#{v_raw} do",
+        f"  local {v_ct} = string.byte({v_raw}[{v_ii}])",
+        f"  local {v_k} = ({v_fa} ~ {v_pv} ~ (({v_ii}-1) * {golden} & 0xFF)) & 0xFF",
+        f"  local {v_pt} = {v_ct} ~ {v_k}",
+        f"  {v_dec}[{v_ii}] = string.char({v_pt})",
+        f"  local {v_nfb} = ({v_fa} + {v_fb} + ({v_ct} & 0x0f)) % 251",
+        f"  {v_fa} = {v_fb}",
+        f"  {v_fb} = {v_nfb}",
+        f"  {v_pv} = {v_ct}",
+        f"end",
+    ]
+
+    # Dead block 5
+    L += _dead(rng, N, 3)
+
+    # ── load() and execute ───────────────────────────────────────────────
+    v_src = N(); v_fn = N(); v_err = N()
+    L += [
+        f"local {v_src} = table.concat({v_dec})",
+        f"local {v_fn}, {v_err} = load({v_src})",
+        f"if {v_fn} then",
+        f"  {v_fn}()",
+        f"elseif {_op_false(rng)} then",
+        f"  print({v_err})",
+        f"end",
+    ]
+
+    return "\n".join(L).encode("utf-8")
+
+
+# ── Quick self-test ─────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    import sys
+
+    payload = b'print("LuaR v3 obfuscation works!") for i=1,3 do print(i*i) end'
+    print("[*] Obfuscating...")
+    result = obfuscate_bytecode(payload)
+    print(f"[+] Output: {len(result):,} bytes")
+    print("[*] Preview (first 600 chars):")
+    print(result[:600].decode("utf-8", errors="replace"))
+    out_path = "/home/claude/test_v3.lua"
+    with open(out_path, "wb") as f:
+        f.write(result)
+    print(f"\n[+] Saved: {out_path}")
