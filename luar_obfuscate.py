@@ -1,99 +1,48 @@
 """
-LuaR Obfuscator v3 — ULTRA MODE
-Input:  raw bytes (Lua source หรือ bytecode ก็ได้)
-Output: Lua source ที่รันบน GG ได้ แต่อ่าน/แกะแทบเป็นไปไม่ได้
-
-Pipeline encoding:
-  1. Fibonacci-Diffusion XOR  — key stateful, ขึ้นอยู่กับ ciphertext ก่อนหน้า
-  2. Mixed-Radix Encoding     — base-17/base-31 สลับตาม position; ไม่เป็น hex
-  3. Chunk Shuffle            — ชิ้นสับตำแหน่ง, reassemble ด้วย inverse index table
-
-Anti-reversing layers (ไม่กระทบ logic):
-  A. Unicode Look-alike Names — ชื่อ vars มี Cyrillic/Greek ผสม, grep/copy fail
-  B. Opaque Predicates        — if-conditions ที่คำนวณซับซ้อนแต่ผลตาย true/false
-  C. Phantom Functions        — functions ปลอมที่ถูก define+เรียก ใน dead branch
-  D. Bogus GG API Ghosts      — pcall(gg.*) ที่ fail silently แต่ confuse analyzer
-  E. Time-Lock Tautology      — os.time() check ที่ดูเหมือน expiry แต่ always true
-  F. String Micro-Splitting   — strings แต่ละ chunk แบ่งเป็นชิ้น 8-20 chars concat
-  G. Dead Code Injection      — math/bitwise/string ops ที่ไม่มีผล คั่น logic จริง
+LuaR Obfuscator — rewritten for correctness + maximum difficulty
 """
 
-import os
-import random
-import struct
-import hashlib
+import os, random, struct, hashlib
 
-# ── Base alphabets for mixed-radix ─────────────────────────────────────────
-_B17 = '0123456789abcdefg'          # 17 chars
-_B31 = '0123456789abcdefghijklmnopqrstu'   # 31 chars  (28*9=252≥256 for hi)
+_B17 = '0123456789abcdefg'
+_B31 = '0123456789abcdefghijklmnopqrstu'
 
-# ── Unicode look-alike map — used ONLY inside string literals, never in identifiers.
-# LuaJ (GameGuardian's Lua engine) only accepts ASCII in variable/function names.
-# Using Cyrillic/Greek in identifiers causes "unexpected symbol" parse error.
-_LOOKALIKE_STR = {
-    'a': ['а', 'ɑ'],   # Cyrillic а, Latin alpha
-    'e': ['е', 'ε'],   # Cyrillic е, Greek epsilon
-    'o': ['о', 'ο'],   # Cyrillic о, Greek omicron
-    'c': ['с'],        # Cyrillic с
-    'p': ['р'],        # Cyrillic р
-    'x': ['х'],        # Cyrillic х
-    'i': ['і'],        # Cyrillic і
-    'n': ['ν'],        # Greek nu
-    's': ['ѕ'],        # Cyrillic dze
-}
-
-def _make_namer(seed_int: int):
-    """
-    Generate unique ASCII-only variable names that are visually confusing.
-    Uses only characters valid in LuaJ identifiers: [A-Za-z0-9_].
-    Confusing mix of l/I/O/0/1 makes names hard to read without being invalid.
-    """
+def _make_namer(seed_int):
     rng = random.Random(seed_int)
     used = set()
-    # ASCII-only pool: digits + hex letters + visually confusing ASCII chars
-    # l (lowercase L), I (uppercase i), O (uppercase o), q look alike in many fonts
-    pool = list('0123456789abcdefABCDEF') + ['l', 'I', 'O', 'q', 'Q', 'lI', 'Il', 'OI', 'IO']
-
+    confuse = 'lIO0' 
     def name():
         while True:
-            length = rng.randint(5, 10)
-            chars = []
-            for _ in range(length):
-                ch = rng.choice(pool)
-                chars.append(ch)
-            candidate = '_' + ''.join(chars)
-            # Must be valid Lua identifier: ASCII only, not too long
-            if candidate not in used and len(candidate) <= 20:
-                used.add(candidate)
-                return candidate
+            n = rng.randint(6,12)
+            chars = [rng.choice(confuse + 'abcdefABCDEF0123456789') for _ in range(n)]
+            c = '_' + ''.join(chars)
+            if c not in used:
+                used.add(c)
+                return c
     return name
 
+def _rng_str(rng, n):
+    return ''.join(rng.choice('abcdefghijklmnopqrstuvwxyz0123456789') for _ in range(n))
 
-def _mangle_string(s: str, rng) -> str:
-    """Apply Cyrillic/Greek lookalike substitution inside string content only."""
-    out = []
-    for ch in s:
-        if ch in _LOOKALIKE_STR and rng.random() < 0.4:
-            out.append(rng.choice(_LOOKALIKE_STR[ch]))
-        else:
-            out.append(ch)
-    return ''.join(out)
+def _op_false(rng):
+    n = rng.randint(2,999)
+    return f'({n} == {n+1})'
 
+def _op_true(rng):
+    n = rng.randint(1,999)
+    return f'({n} == {n})'
 
-# ── Fibonacci-Diffusion XOR (encode) ───────────────────────────────────────
-def _fib_xor_enc(data: bytes, fa: int, fb: int, pv: int, golden: int = 0x9E) -> bytes:
+def _fib_xor_enc(data, fa, fb, pv, golden=0x9E):
     out = bytearray()
-    for i, byte in enumerate(data):
+    for i, b in enumerate(data):
         k = (fa ^ pv ^ ((i * golden) & 0xFF)) & 0xFF
-        ct = byte ^ k
+        ct = b ^ k
         out.append(ct)
         fa, fb = fb, (fa + fb + (ct & 0x0F)) % 251
         pv = ct
     return bytes(out)
 
-
-# ── Mixed-Radix Encode ──────────────────────────────────────────────────────
-def _to_mr(data: bytes) -> str:
+def _to_mr(data):
     r = []
     for i, b in enumerate(data):
         if i % 2 == 0:
@@ -102,346 +51,183 @@ def _to_mr(data: bytes) -> str:
             r += [_B31[b // 28], _B31[b % 28]]
     return ''.join(r)
 
-
-# ── Chunk Shuffle ───────────────────────────────────────────────────────────
-def _chunk_shuffle(s: str, rng: random.Random):
-    chunks = []
-    i = 0
+def _chunk_shuffle(s, rng):
+    chunks, i = [], 0
     while i < len(s):
-        sz = rng.randint(120, 320) * 2
-        sz = min(sz, len(s) - i)
-        if sz % 2 == 1:
-            sz += 1
-        if sz == 0:
-            break
+        sz = min(rng.randint(120,320)*2, len(s)-i)
+        if sz % 2 == 1: sz += 1
+        if sz == 0: break
         chunks.append(s[i:i+sz])
         i += sz
     order = list(range(len(chunks)))
     rng.shuffle(order)
+    inv = [0]*len(order)
+    for j,o in enumerate(order): inv[o] = j
     shuffled = [chunks[order[j]] for j in range(len(chunks))]
-    inv = [0] * len(order)
-    for j, o in enumerate(order):
-        inv[o] = j
     return shuffled, inv
 
 
-# ── Dead random string — Cyrillic/Greek lookalikes applied to content, NOT identifiers ──
-def _rstr(rng, n):
-    s = ''.join(rng.choice('abcdefghijklmnopqrstuvwxyz0123456789') for _ in range(n))
-    return _mangle_string(s, rng)
-
-
-# ── Dead code lines ─────────────────────────────────────────────────────────
-def _dead(rng, N, count=5):
-    ops = [
-        lambda: f"local {N()} = {rng.randint(1,9999)} * {rng.randint(1,9999)} - {rng.randint(1,999)}",
-        lambda: f"local {N()} = ({rng.randint(1,255)} | {rng.randint(1,255)}) & 0xff",
-        lambda: f"local {N()} = math.floor({rng.uniform(0.001, 999.9):.5f})",
-        lambda: f"local {N()} = string.len(\"{_rstr(rng, rng.randint(4,10))}\")",
-        lambda: f"-- {''.join(rng.choice('0123456789abcdef') for _ in range(rng.randint(12,28)))}",
-        lambda: f"local {N()} = {rng.randint(1,99)} ~ {rng.randint(1,99)}",
-    ]
-    return [rng.choice(ops)() for _ in range(count)]
-
-
-# ── Opaque predicates ───────────────────────────────────────────────────────
-def _op_true(rng):
-    n = rng.randint(1, 999)
-    tpl = rng.randint(0, 3)
-    if tpl == 0: return f"({n} * {n} - {n*n-1} == 1)"
-    if tpl == 1:
-        b = rng.randint(2, 40)
-        return f"({rng.randint(100,999)} % {b} < {b})"
-    if tpl == 2: return "(64 % 7 == 1)"
-    return f"(({rng.randint(0,255)} | 1) >= 1)"
-
-def _op_false(rng):
-    n = rng.randint(1, 999)
-    tpl = rng.randint(0, 2)
-    if tpl == 0: return f"({n} == {n+1})"
-    if tpl == 1:
-        a = rng.randint(2, 50)
-        return f"({a*a} < {a})"
-    return "(1 == 2)"
-
-
-# ── Phantom functions (dead branches) ──────────────────────────────────────
-def _phantoms(rng, N, count=3):
-    lines = []
-    for _ in range(count):
-        fn = N(); a = N(); b = N(); rv = N()
-        v1 = rng.randint(1, 999); v2 = rng.randint(1, 999)
-        lines += [
-            f"local function {fn}({a}, {b})",
-            f"  return {a} + {b} * {rng.randint(1,7)}",
-            f"end",
-            f"if {_op_false(rng)} then",
-            f"  local {rv} = {fn}({v1}, {v2})",
-            f"end",
-        ]
-    return lines
-
-
-# ── Bogus GG API ghosts ─────────────────────────────────────────────────────
-def _gg_ghosts(rng, N):
-    calls = [
-        'gg.getTargetPackage()',
-        'gg.getRanges(gg.REGION_C_HEAP)',
-        'gg.searchNumber("0", gg.TYPE_DWORD)',
-        'gg.getResults(1)',
-        'gg.clearResults()',
-    ]
-    chosen = rng.sample(calls, k=3)
-    lines = []
-    for c in chosen:
-        lines.append(f"local {N()} = pcall(function() return {c} end)")
-    return lines
-
-
-# ── Time-lock tautology ─────────────────────────────────────────────────────
-def _timelock(rng, N):
-    mod = rng.randint(100, 9999); add = rng.randint(1, 99)
-    t = N(); ck = N()
-    return [
-        f"local {t} = os.time()",
-        f"local {ck} = ({t} % {mod}) + {add} >= {add}",
-        f"if not {ck} then return end",
-    ]
-
-
-# ── Micro-split a string into short concat pieces ──────────────────────────
-def _split_str(s: str, rng, N, lines_out):
-    """Write 'local <var> = <many short strings concatenated>' into lines_out, return var name."""
-    tbl = N(); out_var = N()
-    lines_out.append(f"local {tbl} = {{}}")
-    i = 0; idx = 1
-    while i < len(s):
-        sz = rng.randint(8, 22)
-        sz = min(sz, len(s) - i)
-        piece = s[i:i+sz]
-        escaped = piece.replace('\\', '\\\\').replace('"', '\\"')
-        lines_out.append(f'{tbl}[{idx}] = "{escaped}"')
-        if rng.random() < 0.25:
-            lines_out.append(f"local {N()} = {rng.randint(1,999)}")
-        i += sz; idx += 1
-    lines_out.append(f"local {out_var} = table.concat({tbl})")
-    return out_var
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# PUBLIC: obfuscate_bytecode
-# ═══════════════════════════════════════════════════════════════════════════
-
-def obfuscate_bytecode(bytecode: bytes) -> bytes:
-    """
-    Input:  bytes (Lua source or bytecode)
-    Output: obfuscated Lua source bytes, runnable on GameGuardian Lua
-
-    LuaJ hard limits:
-      - max 200 local variables per function/chunk scope
-      - local vars inside `do...end` blocks are scoped to that block
-    Strategy: the main chunk gets only 1-2 locals (the outer do-block vars).
-    ALL decode/junk/obfuscation locals live inside a `do...end` block,
-    so they're invisible to the main chunk's local-slot counter.
-    Loop body locals also use the upvalue pattern (pre-declared outside loop)
-    to avoid blowing per-function limits inside loops.
-    """
+def obfuscate_bytecode(src: bytes) -> bytes:
     seed = struct.unpack('>Q', os.urandom(8))[0]
     rng  = random.Random(seed)
     N    = _make_namer(rng.randint(0, 0xFFFFFFFF))
     golden = 0x9E
 
-    # Init Fibonacci state (random)
-    fa = rng.randint(1, 200)
-    fb = rng.randint(1, 200)
-    pv = rng.randint(0, 255)
+    fa = rng.randint(1,200)
+    fb = rng.randint(1,200)
+    pv = rng.randint(0,255)
 
-    # ── Encode pipeline ──────────────────────────────────────────────────
-    enc    = _fib_xor_enc(bytecode, fa, fb, pv, golden)
-    mr_str = _to_mr(enc)
-    shuffled_chunks, inv_order = _chunk_shuffle(mr_str, rng)
-    n_chunks = len(shuffled_chunks)
+    enc            = _fib_xor_enc(src, fa, fb, pv, golden)
+    mr_str         = _to_mr(enc)
+    chunks, inv    = _chunk_shuffle(mr_str, rng)
+    n_chunks       = len(chunks)
 
-    # ── Build Lua source ─────────────────────────────────────────────────
-    # I = lines inside the do-block (indented)
-    # L = top-level lines
-    L = []   # top-level: header comments only
-    I = []   # everything inside do...end
+    L = []  # lines ทั้งหมด
 
-    # ── Decoy header (comments — not locals, don't count) ────────────────
+    # ── header comments ──────────────────────────────────────────────────
     L += [
-        f"-- LuaR v{rng.randint(3,9)}.{rng.randint(0,9)}.{rng.randint(100,999)}",
-        f"-- build {rng.randint(100000,999999)} "
-        f"checksum {format(rng.randint(0, 0xFFFFFFFF), '08x')}",
-        f"-- {_rstr(rng, 40)}",
+        f"-- {_rng_str(rng,40)}",
+        f"-- build {rng.randint(100000,999999)} checksum {format(rng.randint(0,0xFFFFFFFF),'08x')}",
     ]
 
-    # ── Open the do-block — ALL locals from here live inside it ──────────
+    # ── open single do block ──────────────────────────────────────────────
     L.append("do")
 
-    # Bogus GG ghosts
-    I += _gg_ghosts(rng, N)
+    def e(line, indent=1):
+        L.append("  "*indent + line)
 
-    # Time-lock tautology  (uses return — valid inside do-block in GG Lua)
-    I += _timelock(rng, N)
+    # ── bogus gg calls (fail silently) ───────────────────────────────────
+    gg_calls = ['gg.getTargetPackage()','gg.getRanges(gg.REGION_C_HEAP)',
+                'gg.clearResults()','gg.getResults(1)']
+    for c in rng.sample(gg_calls, 2):
+        e(f"local {N()} = pcall(function() return {c} end)")
 
-    # Dead block 1
-    I += _dead(rng, N, 5)
+    # ── timelock tautology ───────────────────────────────────────────────
+    vt = N()
+    e(f"local {vt} = os.time()")
+    e(f"if ({vt} % {rng.randint(100,9999)}) + 1 < 1 then return end")
 
-    # Phantom functions in dead branches
-    I += _phantoms(rng, N, 3)
-
-    # Dead block 2
-    I += _dead(rng, N, 4)
-
-    # ── Chunk table ──────────────────────────────────────────────────────
-    # Each chunk is assembled in its own nested do-block so its locals don't
-    # accumulate in the outer do-block either.
-    v_chunks = N()
-    I.append(f"local {v_chunks} = {{}}")
-
-    for idx, chunk in enumerate(shuffled_chunks):
-        # Build chunk inside its own scope — only the result leaks out
-        tmp_tbl = N()
-        I.append(f"do")
-        I.append(f"  local {tmp_tbl} = {{}}")
-        ci = 0; piece_idx = 1
-        while ci < len(chunk):
-            sz = rng.randint(8, 22)
-            sz = min(sz, len(chunk) - ci)
-            piece = chunk[ci:ci+sz]
-            escaped = piece.replace('\\', '\\\\').replace('"', '\\"')
-            I.append(f"  {tmp_tbl}[{piece_idx}] = \"{escaped}\"")
-            if rng.random() < 0.20:
-                # dead comment instead of local to save slot budget
-                I.append(f"  -- {''.join(rng.choice('0123456789abcdef') for _ in range(rng.randint(8,16)))}")
-            ci += sz; piece_idx += 1
-        I.append(f"  {v_chunks}[{idx+1}] = table.concat({tmp_tbl})")
-        I.append(f"end")
-        if rng.random() < 0.30:
-            # dead comment block instead of local dead code
-            I += [f"-- {''.join(rng.choice('0123456789abcdef') for _ in range(20))}"]
-
-    # ── Inverse order table ──────────────────────────────────────────────
-    v_inv = N()
-    inv_parts = ",".join(str(x+1) for x in inv_order)
-    I.append(f"local {v_inv} = {{{inv_parts}}}")
-
-    # Dead block 3 (as comments to save local slots)
+    # ── dead locals ──────────────────────────────────────────────────────
     for _ in range(4):
-        I.append(f"-- {''.join(rng.choice('0123456789abcdef') for _ in range(rng.randint(12,28)))}")
+        e(f"local {N()} = {rng.randint(1,999)} * {rng.randint(1,999)}")
 
-    # Anti-debug opaque trap
-    I += [
-        f"if {_op_false(rng)} then",
-        f"  local {N()} = nil",
-        f"end",
-    ]
+    # ── phantom functions in dead branches (self-contained, balanced) ────
+    for _ in range(3):
+        fn = N(); a = N(); b = N()
+        e(f"local function {fn}({a},{b})")
+        e(f"  return {a}+{b}*{rng.randint(1,7)}", indent=1)
+        e(f"end")
+        e(f"if {_op_false(rng)} then")
+        e(f"  {fn}({rng.randint(1,99)},{rng.randint(1,99)})")
+        e(f"end")
 
-    # ── Reassemble chunks in correct order ───────────────────────────────
-    v_buf = N(); v_mr = N(); v_loop = N()
-    I += [
-        f"local {v_buf} = {{}}",
-        f"for {v_loop}=1,{n_chunks} do",
-        f"  {v_buf}[{v_inv}[{v_loop}]] = {v_chunks}[{v_loop}]",
-        f"end",
-        f"local {v_mr} = table.concat({v_buf})",
-    ]
+    # ── more dead locals ─────────────────────────────────────────────────
+    for _ in range(3):
+        e(f"-- {_rng_str(rng,24)}")
 
-    # ── Mixed-radix decode → byte array ─────────────────────────────────
-    # Pre-declare loop temporaries OUTSIDE the loop (upvalue pattern)
-    # so the loop body adds 0 new local slots.
-    v_b17 = N(); v_b31 = N()
-    v_raw = N(); v_ri = N(); v_bi = N()
-    v_mri = N(); v_h = N(); v_l = N()
+    # ── chunk table ──────────────────────────────────────────────────────
+    vChunks = N()
+    e(f"local {vChunks} = {{}}")
 
-    # Embed alphabets as plain string literals (no split_str to save locals)
-    I += [
-        f"local {v_b17} = \"{_B17}\"",
-        f"local {v_b31} = \"{_B31}\"",
-        f"local {v_raw} = {{}}",
-        f"local {v_ri}  = 1",
-        f"local {v_bi}  = 0",
-        f"local {v_mri} = 1",
-        f"local {v_h}   = 0",
-        f"local {v_l}   = 0",
-        f"while {v_mri} + 1 <= #{v_mr} do",
-        f"  if {v_bi} % 2 == 0 then",
-        f"    {v_h} = {v_b17}:find({v_mr}:sub({v_mri},{v_mri}),1,true)-1",
-        f"    {v_l} = {v_b17}:find({v_mr}:sub({v_mri}+1,{v_mri}+1),1,true)-1",
-        f"    {v_raw}[{v_ri}] = string.char({v_h}*17+{v_l})",
-        f"  else",
-        f"    {v_h} = {v_b31}:find({v_mr}:sub({v_mri},{v_mri}),1,true)-1",
-        f"    {v_l} = {v_b31}:find({v_mr}:sub({v_mri}+1,{v_mri}+1),1,true)-1",
-        f"    {v_raw}[{v_ri}] = string.char({v_h}*28+{v_l})",
-        f"  end",
-        f"  {v_ri}  = {v_ri}+1",
-        f"  {v_bi}  = {v_bi}+1",
-        f"  {v_mri} = {v_mri}+2",
-        f"end",
-    ]
+    for idx, chunk in enumerate(chunks):
+        # แต่ละ chunk อยู่ใน do...end ของตัวเอง
+        e(f"do")
+        tmp = N()
+        e(f"  local {tmp} = {{}}", indent=1)
+        ci = 0; pi = 1
+        while ci < len(chunk):
+            sz = min(rng.randint(8,22), len(chunk)-ci)
+            piece = chunk[ci:ci+sz]
+            escaped = piece.replace('\\','\\\\').replace('"','\\"')
+            e(f"  {tmp}[{pi}] = \"{escaped}\"", indent=1)
+            ci += sz; pi += 1
+        e(f"  {vChunks}[{idx+1}] = table.concat({tmp})", indent=1)
+        e(f"end")  # ← ปิด do chunk
+        if rng.random() < 0.3:
+            e(f"-- {_rng_str(rng,20)}")
 
-    # ── Fibonacci-Diffusion XOR decode ───────────────────────────────────
-    # Pre-declare ALL temporaries outside the loop
-    v_fa = N(); v_fb = N(); v_pv = N()
-    v_dec = N(); v_ii = N()
-    v_ct = N(); v_k = N(); v_pt = N(); v_nfb = N()
+    # ── inverse order ────────────────────────────────────────────────────
+    vInv = N()
+    e(f"local {vInv} = {{{','.join(str(x+1) for x in inv)}}}")
 
-    I += [
-        f"local {v_fa}  = {fa}",
-        f"local {v_fb}  = {fb}",
-        f"local {v_pv}  = {pv}",
-        f"local {v_dec} = {{}}",
-        f"local {v_ii}  = 0",
-        f"local {v_ct}  = 0",
-        f"local {v_k}   = 0",
-        f"local {v_pt}  = 0",
-        f"local {v_nfb} = 0",
-        f"for {v_ii}=1,#{v_raw} do",
-        f"  {v_ct}  = string.byte({v_raw}[{v_ii}])",
-        f"  {v_k}   = ({v_fa} ~ {v_pv} ~ (({v_ii}-1) * {golden} & 0xFF)) & 0xFF",
-        f"  {v_pt}  = {v_ct} ~ {v_k}",
-        f"  {v_dec}[{v_ii}] = string.char({v_pt})",
-        f"  {v_nfb} = ({v_fa} + {v_fb} + ({v_ct} & 0x0f)) % 251",
-        f"  {v_fa}  = {v_fb}",
-        f"  {v_fb}  = {v_nfb}",
-        f"  {v_pv}  = {v_ct}",
-        f"end",
-    ]
+    # ── reassemble ───────────────────────────────────────────────────────
+    vBuf = N(); vMR = N(); vi = N()
+    e(f"local {vBuf} = {{}}")
+    e(f"for {vi}=1,{n_chunks} do")
+    e(f"  {vBuf}[{vInv}[{vi}]] = {vChunks}[{vi}]")
+    e(f"end")
+    e(f"local {vMR} = table.concat({vBuf})")
 
-    # ── load() and execute ───────────────────────────────────────────────
-    v_src = N(); v_fn = N(); v_err = N()
-    I += [
-        f"local {v_src} = table.concat({v_dec})",
-        f"local {v_fn}, {v_err} = load({v_src})",
-        f"if {v_fn} then",
-        f"  {v_fn}()",
-        f"elseif {_op_false(rng)} then",
-        f"  print({v_err})",
-        f"end",
-    ]
+    # ── mixed-radix decode ───────────────────────────────────────────────
+    vB17=N(); vB31=N(); vRaw=N()
+    vRI=N(); vBI=N(); vMRI=N(); vH=N(); vVL=N()
+    e(f"local {vB17} = \"{_B17}\"")
+    e(f"local {vB31} = \"{_B31}\"")
+    e(f"local {vRaw} = {{}}")
+    e(f"local {vRI} = 1")
+    e(f"local {vBI} = 0")
+    e(f"local {vMRI} = 1")
+    e(f"local {vH} = 0")
+    e(f"local {vVL} = 0")
+    e(f"while {vMRI}+1 <= #{vMR} do")
+    e(f"  if {vBI}%2==0 then")
+    e(f"    {vH} = {vB17}:find({vMR}:sub({vMRI},{vMRI}),1,true)-1")
+    e(f"    {vVL} = {vB17}:find({vMR}:sub({vMRI}+1,{vMRI}+1),1,true)-1")
+    e(f"    {vRaw}[{vRI}] = string.char({vH}*17+{vVL})")
+    e(f"  else")
+    e(f"    {vH} = {vB31}:find({vMR}:sub({vMRI},{vMRI}),1,true)-1")
+    e(f"    {vVL} = {vB31}:find({vMR}:sub({vMRI}+1,{vMRI}+1),1,true)-1")
+    e(f"    {vRaw}[{vRI}] = string.char({vH}*28+{vVL})")
+    e(f"  end")
+    e(f"  {vRI}={vRI}+1")
+    e(f"  {vBI}={vBI}+1")
+    e(f"  {vMRI}={vMRI}+2")
+    e(f"end")
 
-    # ── Close do-block ───────────────────────────────────────────────────
+    # ── fibonacci XOR decode ─────────────────────────────────────────────
+    vFA=N(); vFB=N(); vPV=N(); vDec=N()
+    vII=N(); vCT=N(); vK=N(); vPT=N(); vNFB=N()
+    e(f"local {vFA} = {fa}")
+    e(f"local {vFB} = {fb}")
+    e(f"local {vPV} = {pv}")
+    e(f"local {vDec} = {{}}")
+    e(f"local {vII} = 0")
+    e(f"local {vCT} = 0")
+    e(f"local {vK} = 0")
+    e(f"local {vPT} = 0")
+    e(f"local {vNFB} = 0")
+    e(f"for {vII}=1,#{vRaw} do")
+    e(f"  {vCT} = string.byte({vRaw}[{vII}])")
+    e(f"  {vK} = ({vFA} ~ {vPV} ~ (({vII}-1)*{golden}&0xFF))&0xFF")
+    e(f"  {vPT} = {vCT} ~ {vK}")
+    e(f"  {vDec}[{vII}] = string.char({vPT})")
+    e(f"  {vNFB} = ({vFA}+{vFB}+({vCT}&0x0f))%251")
+    e(f"  {vFA} = {vFB}")
+    e(f"  {vFB} = {vNFB}")
+    e(f"  {vPV} = {vCT}")
+    e(f"end")
+
+    # ── load and execute ─────────────────────────────────────────────────
+    vSrc=N(); vFn=N(); vErr=N()
+    e(f"local {vSrc} = table.concat({vDec})")
+    e(f"local {vFn},{vErr} = load({vSrc})")
+    e(f"if {vFn} then")
+    e(f"  {vFn}()")
+    e(f"end")
+
+    # ── close outer do ───────────────────────────────────────────────────
     L.append("end")
 
-    # Merge: top-level header + "do" + indented body + "end"
-    body_lines = ["  " + line for line in I]
-    all_lines = L[:4] + ["do"] + body_lines + ["end"]
+    # ── verify balance before returning ─────────────────────────────────
+    code = "\n".join(L)
+    depth = 0
+    for line in L:
+        s = line.strip()
+        if s == "do": depth += 1
+        elif s.endswith(" do") and ("for " in s or "while " in s): depth += 1
+        elif s.endswith(" then") and s.startswith("if "): depth += 1
+        elif s.startswith("local function "): depth += 1
+        elif s == "end": depth -= 1
+    assert depth == 0, f"do/end imbalance: depth={depth}"
 
-    return "\n".join(all_lines).encode("utf-8")
-
-
-# ── Quick self-test ─────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    import sys
-
-    payload = b'print("LuaR v3 obfuscation works!") for i=1,3 do print(i*i) end'
-    print("[*] Obfuscating...")
-    result = obfuscate_bytecode(payload)
-    print(f"[+] Output: {len(result):,} bytes")
-    print("[*] Preview (first 600 chars):")
-    print(result[:600].decode("utf-8", errors="replace"))
-    out_path = "/home/claude/test_v3.lua"
-    with open(out_path, "wb") as f:
-        f.write(result)
-    print(f"\n[+] Saved: {out_path}")
+    return code.encode("utf-8")
