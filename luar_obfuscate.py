@@ -236,6 +236,15 @@ def obfuscate_bytecode(bytecode: bytes) -> bytes:
     """
     Input:  bytes (Lua source or bytecode)
     Output: obfuscated Lua source bytes, runnable on GameGuardian Lua
+
+    LuaJ hard limits:
+      - max 200 local variables per function/chunk scope
+      - local vars inside `do...end` blocks are scoped to that block
+    Strategy: the main chunk gets only 1-2 locals (the outer do-block vars).
+    ALL decode/junk/obfuscation locals live inside a `do...end` block,
+    so they're invisible to the main chunk's local-slot counter.
+    Loop body locals also use the upvalue pattern (pre-declared outside loop)
+    to avoid blowing per-function limits inside loops.
     """
     seed = struct.unpack('>Q', os.urandom(8))[0]
     rng  = random.Random(seed)
@@ -254,9 +263,12 @@ def obfuscate_bytecode(bytecode: bytes) -> bytes:
     n_chunks = len(shuffled_chunks)
 
     # ── Build Lua source ─────────────────────────────────────────────────
-    L = []  # lines
+    # I = lines inside the do-block (indented)
+    # L = top-level lines
+    L = []   # top-level: header comments only
+    I = []   # everything inside do...end
 
-    # Decoy header
+    # ── Decoy header (comments — not locals, don't count) ────────────────
     L += [
         f"-- LuaR v{rng.randint(3,9)}.{rng.randint(0,9)}.{rng.randint(100,999)}",
         f"-- build {rng.randint(100000,999999)} "
@@ -264,41 +276,63 @@ def obfuscate_bytecode(bytecode: bytes) -> bytes:
         f"-- {_rstr(rng, 40)}",
     ]
 
-    # Bogus GG ghosts (confuse static analysis of gg.* usage)
-    L += _gg_ghosts(rng, N)
+    # ── Open the do-block — ALL locals from here live inside it ──────────
+    L.append("do")
 
-    # Time-lock tautology
-    L += _timelock(rng, N)
+    # Bogus GG ghosts
+    I += _gg_ghosts(rng, N)
+
+    # Time-lock tautology  (uses return — valid inside do-block in GG Lua)
+    I += _timelock(rng, N)
 
     # Dead block 1
-    L += _dead(rng, N, 5)
+    I += _dead(rng, N, 5)
 
     # Phantom functions in dead branches
-    L += _phantoms(rng, N, 3)
+    I += _phantoms(rng, N, 3)
 
     # Dead block 2
-    L += _dead(rng, N, 4)
+    I += _dead(rng, N, 4)
 
     # ── Chunk table ──────────────────────────────────────────────────────
+    # Each chunk is assembled in its own nested do-block so its locals don't
+    # accumulate in the outer do-block either.
     v_chunks = N()
-    L.append(f"local {v_chunks} = {{}}")
+    I.append(f"local {v_chunks} = {{}}")
 
     for idx, chunk in enumerate(shuffled_chunks):
-        sub_var = _split_str(chunk, rng, N, L)
-        L.append(f"{v_chunks}[{idx+1}] = {sub_var}")
-        if rng.random() < 0.35:
-            L += _dead(rng, N, 2)
+        # Build chunk inside its own scope — only the result leaks out
+        tmp_tbl = N()
+        I.append(f"do")
+        I.append(f"  local {tmp_tbl} = {{}}")
+        ci = 0; piece_idx = 1
+        while ci < len(chunk):
+            sz = rng.randint(8, 22)
+            sz = min(sz, len(chunk) - ci)
+            piece = chunk[ci:ci+sz]
+            escaped = piece.replace('\\', '\\\\').replace('"', '\\"')
+            I.append(f"  {tmp_tbl}[{piece_idx}] = \"{escaped}\"")
+            if rng.random() < 0.20:
+                # dead comment instead of local to save slot budget
+                I.append(f"  -- {''.join(rng.choice('0123456789abcdef') for _ in range(rng.randint(8,16)))}")
+            ci += sz; piece_idx += 1
+        I.append(f"  {v_chunks}[{idx+1}] = table.concat({tmp_tbl})")
+        I.append(f"end")
+        if rng.random() < 0.30:
+            # dead comment block instead of local dead code
+            I += [f"-- {''.join(rng.choice('0123456789abcdef') for _ in range(20))}"]
 
     # ── Inverse order table ──────────────────────────────────────────────
     v_inv = N()
     inv_parts = ",".join(str(x+1) for x in inv_order)
-    L.append(f"local {v_inv} = {{{inv_parts}}}")
+    I.append(f"local {v_inv} = {{{inv_parts}}}")
 
-    # Dead block 3
-    L += _dead(rng, N, 4)
+    # Dead block 3 (as comments to save local slots)
+    for _ in range(4):
+        I.append(f"-- {''.join(rng.choice('0123456789abcdef') for _ in range(rng.randint(12,28)))}")
 
     # Anti-debug opaque trap
-    L += [
+    I += [
         f"if {_op_false(rng)} then",
         f"  local {N()} = nil",
         f"end",
@@ -306,7 +340,7 @@ def obfuscate_bytecode(bytecode: bytes) -> bytes:
 
     # ── Reassemble chunks in correct order ───────────────────────────────
     v_buf = N(); v_mr = N(); v_loop = N()
-    L += [
+    I += [
         f"local {v_buf} = {{}}",
         f"for {v_loop}=1,{n_chunks} do",
         f"  {v_buf}[{v_inv}[{v_loop}]] = {v_chunks}[{v_loop}]",
@@ -315,66 +349,69 @@ def obfuscate_bytecode(bytecode: bytes) -> bytes:
     ]
 
     # ── Mixed-radix decode → byte array ─────────────────────────────────
+    # Pre-declare loop temporaries OUTSIDE the loop (upvalue pattern)
+    # so the loop body adds 0 new local slots.
     v_b17 = N(); v_b31 = N()
-    v_raw = N(); v_ri  = N(); v_bi = N()
+    v_raw = N(); v_ri = N(); v_bi = N()
+    v_mri = N(); v_h = N(); v_l = N()
 
-    # Split the alphabet strings too (extra obfuscation)
-    b17_var = _split_str(_B17, rng, N, L)
-    b31_var = _split_str(_B31, rng, N, L)
-    L += [
-        f"local {v_b17} = {b17_var}",
-        f"local {v_b31} = {b31_var}",
+    # Embed alphabets as plain string literals (no split_str to save locals)
+    I += [
+        f"local {v_b17} = \"{_B17}\"",
+        f"local {v_b31} = \"{_B31}\"",
         f"local {v_raw} = {{}}",
         f"local {v_ri}  = 1",
         f"local {v_bi}  = 0",
-        f"local _mri = 1",
-        f"while _mri + 1 <= #{v_mr} do",
+        f"local {v_mri} = 1",
+        f"local {v_h}   = 0",
+        f"local {v_l}   = 0",
+        f"while {v_mri} + 1 <= #{v_mr} do",
         f"  if {v_bi} % 2 == 0 then",
-        f"    local _h = {v_b17}:find({v_mr}:sub(_mri,_mri),1,true)-1",
-        f"    local _l = {v_b17}:find({v_mr}:sub(_mri+1,_mri+1),1,true)-1",
-        f"    {v_raw}[{v_ri}] = string.char(_h*17+_l)",
+        f"    {v_h} = {v_b17}:find({v_mr}:sub({v_mri},{v_mri}),1,true)-1",
+        f"    {v_l} = {v_b17}:find({v_mr}:sub({v_mri}+1,{v_mri}+1),1,true)-1",
+        f"    {v_raw}[{v_ri}] = string.char({v_h}*17+{v_l})",
         f"  else",
-        f"    local _h = {v_b31}:find({v_mr}:sub(_mri,_mri),1,true)-1",
-        f"    local _l = {v_b31}:find({v_mr}:sub(_mri+1,_mri+1),1,true)-1",
-        f"    {v_raw}[{v_ri}] = string.char(_h*28+_l)",
+        f"    {v_h} = {v_b31}:find({v_mr}:sub({v_mri},{v_mri}),1,true)-1",
+        f"    {v_l} = {v_b31}:find({v_mr}:sub({v_mri}+1,{v_mri}+1),1,true)-1",
+        f"    {v_raw}[{v_ri}] = string.char({v_h}*28+{v_l})",
         f"  end",
-        f"  {v_ri} = {v_ri}+1",
-        f"  {v_bi} = {v_bi}+1",
-        f"  _mri = _mri+2",
+        f"  {v_ri}  = {v_ri}+1",
+        f"  {v_bi}  = {v_bi}+1",
+        f"  {v_mri} = {v_mri}+2",
         f"end",
     ]
-
-    # Dead block 4
-    L += _dead(rng, N, 3)
 
     # ── Fibonacci-Diffusion XOR decode ───────────────────────────────────
-    v_fa  = N(); v_fb  = N(); v_pv  = N()
-    v_dec = N(); v_ii  = N()
-    v_ct  = N(); v_k   = N(); v_pt  = N(); v_nfb = N()
+    # Pre-declare ALL temporaries outside the loop
+    v_fa = N(); v_fb = N(); v_pv = N()
+    v_dec = N(); v_ii = N()
+    v_ct = N(); v_k = N(); v_pt = N(); v_nfb = N()
 
-    L += [
-        f"local {v_fa} = {fa}",
-        f"local {v_fb} = {fb}",
-        f"local {v_pv} = {pv}",
+    I += [
+        f"local {v_fa}  = {fa}",
+        f"local {v_fb}  = {fb}",
+        f"local {v_pv}  = {pv}",
         f"local {v_dec} = {{}}",
+        f"local {v_ii}  = 0",
+        f"local {v_ct}  = 0",
+        f"local {v_k}   = 0",
+        f"local {v_pt}  = 0",
+        f"local {v_nfb} = 0",
         f"for {v_ii}=1,#{v_raw} do",
-        f"  local {v_ct} = string.byte({v_raw}[{v_ii}])",
-        f"  local {v_k} = ({v_fa} ~ {v_pv} ~ (({v_ii}-1) * {golden} & 0xFF)) & 0xFF",
-        f"  local {v_pt} = {v_ct} ~ {v_k}",
+        f"  {v_ct}  = string.byte({v_raw}[{v_ii}])",
+        f"  {v_k}   = ({v_fa} ~ {v_pv} ~ (({v_ii}-1) * {golden} & 0xFF)) & 0xFF",
+        f"  {v_pt}  = {v_ct} ~ {v_k}",
         f"  {v_dec}[{v_ii}] = string.char({v_pt})",
-        f"  local {v_nfb} = ({v_fa} + {v_fb} + ({v_ct} & 0x0f)) % 251",
-        f"  {v_fa} = {v_fb}",
-        f"  {v_fb} = {v_nfb}",
-        f"  {v_pv} = {v_ct}",
+        f"  {v_nfb} = ({v_fa} + {v_fb} + ({v_ct} & 0x0f)) % 251",
+        f"  {v_fa}  = {v_fb}",
+        f"  {v_fb}  = {v_nfb}",
+        f"  {v_pv}  = {v_ct}",
         f"end",
     ]
-
-    # Dead block 5
-    L += _dead(rng, N, 3)
 
     # ── load() and execute ───────────────────────────────────────────────
     v_src = N(); v_fn = N(); v_err = N()
-    L += [
+    I += [
         f"local {v_src} = table.concat({v_dec})",
         f"local {v_fn}, {v_err} = load({v_src})",
         f"if {v_fn} then",
@@ -384,7 +421,14 @@ def obfuscate_bytecode(bytecode: bytes) -> bytes:
         f"end",
     ]
 
-    return "\n".join(L).encode("utf-8")
+    # ── Close do-block ───────────────────────────────────────────────────
+    L.append("end")
+
+    # Merge: top-level header + "do" + indented body + "end"
+    body_lines = ["  " + line for line in I]
+    all_lines = L[:4] + ["do"] + body_lines + ["end"]
+
+    return "\n".join(all_lines).encode("utf-8")
 
 
 # ── Quick self-test ─────────────────────────────────────────────────────────
