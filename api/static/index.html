@@ -299,19 +299,35 @@ function setLoading(loading) {
   lbl.textContent    = loading ? 'Processing…' : '🔒 Protect';
 }
 
-function showResult(ok, msg, dlUrl, dlName) {
+function showResult(ok, msg, dlBlob, dlName) {
   const el = document.getElementById('res-protect');
   el.className = 'result visible ' + (ok ? 'ok' : 'err');
 
-  const title = ok ? (dlUrl ? 'Protected' : 'Success') : 'Error';
+  const title = ok ? (dlBlob ? 'Protected' : 'Success') : 'Error';
   let html = `<div class="result-header">
     <div class="dot ${ok ? 'ok' : 'err'}"></div>${title}
   </div>`;
 
-  if (msg)   html += `<pre>${esc(msg)}</pre>`;
-  if (dlUrl) html += `<a class="dl-btn" href="${dlUrl}" download="${dlName}">⬇ Download ${dlName}</a>`;
+  if (msg) html += `<pre>${esc(msg)}</pre>`;
+
+  // ปุ่ม Download — ใช้ id เพื่อ attach blob หลัง render
+  if (dlBlob) html += `<button class="dl-btn" id="dl-btn">⬇ Download ${esc(dlName)}</button>`;
 
   el.innerHTML = html;
+
+  if (dlBlob) {
+    document.getElementById('dl-btn').addEventListener('click', () => {
+      // programmatic download — ทำงานได้บน Android Chrome
+      const url = URL.createObjectURL(dlBlob);
+      const a   = document.createElement('a');
+      a.href     = url;
+      a.download = dlName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    });
+  }
 }
 
 function esc(s) {
@@ -336,8 +352,7 @@ async function doProtect() {
     if (r.ok) {
       const blob    = await r.blob();
       const outName = file.name.replace(/\.lua$/, '.luar');
-      const url     = URL.createObjectURL(blob);
-      showResult(true, 'Protected successfully. Seed embedded — no password needed to run.', url, outName);
+      showResult(true, 'Protected successfully. Seed embedded — no password needed to run.', blob, outName);
     } else {
       const j = await r.json();
       showResult(false, j.error || 'Unknown error.');

@@ -30,12 +30,17 @@ def _do_protect():
     finally:
         tmp_path.unlink(missing_ok=True)
     stem = Path(f.filename).stem if f.filename else "protected"
-    return send_file(
+    resp = send_file(
         io.BytesIO(data),
         mimetype="application/octet-stream",
         as_attachment=True,
         download_name=stem + ".luar",
     )
+    # Force download — ป้องกัน Android Chrome render เป็น HTML
+    resp.headers["Content-Disposition"] = f'attachment; filename="{stem}.luar"'
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 def _do_run():
