@@ -27,8 +27,10 @@ import hashlib
 _B17 = '0123456789abcdefg'          # 17 chars
 _B31 = '0123456789abcdefghijklmnopqrstu'   # 31 chars  (28*9=252≥256 for hi)
 
-# ── Unicode look-alike map (Cyrillic/Greek that look like ASCII) ────────────
-_LOOKALIKE = {
+# ── Unicode look-alike map — used ONLY inside string literals, never in identifiers.
+# LuaJ (GameGuardian's Lua engine) only accepts ASCII in variable/function names.
+# Using Cyrillic/Greek in identifiers causes "unexpected symbol" parse error.
+_LOOKALIKE_STR = {
     'a': ['а', 'ɑ'],   # Cyrillic а, Latin alpha
     'e': ['е', 'ε'],   # Cyrillic е, Greek epsilon
     'o': ['о', 'ο'],   # Cyrillic о, Greek omicron
@@ -41,24 +43,41 @@ _LOOKALIKE = {
 }
 
 def _make_namer(seed_int: int):
+    """
+    Generate unique ASCII-only variable names that are visually confusing.
+    Uses only characters valid in LuaJ identifiers: [A-Za-z0-9_].
+    Confusing mix of l/I/O/0/1 makes names hard to read without being invalid.
+    """
     rng = random.Random(seed_int)
     used = set()
-    pool = list('0123456789abcdef') + ['l', 'I', 'O', 'q']
+    # ASCII-only pool: digits + hex letters + visually confusing ASCII chars
+    # l (lowercase L), I (uppercase i), O (uppercase o), q look alike in many fonts
+    pool = list('0123456789abcdefABCDEF') + ['l', 'I', 'O', 'q', 'Q', 'lI', 'Il', 'OI', 'IO']
 
     def name():
         while True:
-            length = rng.randint(5, 8)
+            length = rng.randint(5, 10)
             chars = []
             for _ in range(length):
                 ch = rng.choice(pool)
-                if ch in _LOOKALIKE and rng.random() < 0.3:
-                    ch = rng.choice(_LOOKALIKE[ch])
                 chars.append(ch)
             candidate = '_' + ''.join(chars)
-            if candidate not in used:
+            # Must be valid Lua identifier: ASCII only, not too long
+            if candidate not in used and len(candidate) <= 20:
                 used.add(candidate)
                 return candidate
     return name
+
+
+def _mangle_string(s: str, rng) -> str:
+    """Apply Cyrillic/Greek lookalike substitution inside string content only."""
+    out = []
+    for ch in s:
+        if ch in _LOOKALIKE_STR and rng.random() < 0.4:
+            out.append(rng.choice(_LOOKALIKE_STR[ch]))
+        else:
+            out.append(ch)
+    return ''.join(out)
 
 
 # ── Fibonacci-Diffusion XOR (encode) ───────────────────────────────────────
@@ -106,9 +125,10 @@ def _chunk_shuffle(s: str, rng: random.Random):
     return shuffled, inv
 
 
-# ── Dead random string ──────────────────────────────────────────────────────
+# ── Dead random string — Cyrillic/Greek lookalikes applied to content, NOT identifiers ──
 def _rstr(rng, n):
-    return ''.join(rng.choice('abcdefghijklmnopqrstuvwxyz0123456789') for _ in range(n))
+    s = ''.join(rng.choice('abcdefghijklmnopqrstuvwxyz0123456789') for _ in range(n))
+    return _mangle_string(s, rng)
 
 
 # ── Dead code lines ─────────────────────────────────────────────────────────
