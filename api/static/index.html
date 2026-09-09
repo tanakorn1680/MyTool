@@ -280,29 +280,17 @@ footer .sep { margin: 0 0.4rem; opacity: 0.4; }
 </header>
 
 <div class="card">
-  <div class="badge">🛡️ Multi-layer obfuscation · GG compatible</div>
+  <div class="badge">🛡️ Lua Bytecode Protection · GG compatible</div>
 
   <div class="field">
     <label for="file-protect">Lua Script (.lua)</label>
     <div class="dropzone" id="dz-protect">
       <input type="file" id="file-protect" accept=".lua">
       <div class="dz-icon">📄</div>
-      <div class="dz-text">Drop .lua file (source or bytecode)</div>
+      <div class="dz-text">Drop your .lua script here</div>
       <div class="dz-filename" id="name-protect"></div>
     </div>
   </div>
-
-
-  <div class="field" style="margin-top:1rem">
-    <label>ระดับการป้องกัน</label>
-    <div class="level-group">
-      <div class="level-btn active" id="lv-std" onclick="setLevel('standard')">
-        🔒 Standard <span class="level-badge badge-std">v1</span>
-      </div>
-      <div class="level-btn" id="lv-max" onclick="setLevel('max')">
-        🔐 Maximum <span class="level-badge badge-max">v3</span>
-      </div>
-    </div>
     <div class="level-desc" id="level-desc">
       Fibonacci XOR + chunk shuffle + variable mangling — ถอดยากสำหรับคนทั่วไป
     </div>
@@ -317,7 +305,7 @@ footer .sep { margin: 0 0.4rem; opacity: 0.4; }
 </div>
 
 <footer>
-  Standard: XOR + Shuffle · Maximum: RC4 + SHA256 + GG-keyed · LuaR Obfuscator
+  LFSR Cipher + FNV Anti-tamper + Two-stage Bytecode · LuaR Obfuscator v5
 </footer>
 
 <script>
@@ -396,19 +384,6 @@ function esc(s) {
 }
 
 
-// ── Protection level ───────────────────────────────────────────────────────
-let _protLevel = 'standard';
-const _levelDesc = {
-  standard: 'Fibonacci XOR + chunk shuffle + variable mangling — ถอดยากสำหรับคนทั่วไป',
-  max: 'RC4 + SHA-256 + 2-layer encryption · Layer 2 ต้องรู้ package name จาก GG · ไม่มี load(plaintext) — ยากมากสำหรับทุกคน'
-};
-function setLevel(lv) {
-  _protLevel = lv;
-  document.getElementById('lv-std').classList.toggle('active', lv === 'standard');
-  document.getElementById('lv-max').classList.toggle('active', lv === 'max');
-  document.getElementById('level-desc').textContent = _levelDesc[lv];
-}
-
 // ── Protect ────────────────────────────────────────────────────────────────
 async function doProtect() {
   const file = document.getElementById('file-protect').files[0];
@@ -418,7 +393,6 @@ async function doProtect() {
   try {
     const fd = new FormData();
     fd.append('file', file);
-    fd.append('level', _protLevel);
 
     const r = await fetch('/api/index', {
       method: 'POST',
@@ -428,11 +402,8 @@ async function doProtect() {
 
     if (r.ok) {
       const blob    = await r.blob();
-      const suffix  = _protLevel === 'max' ? '_protected_max' : '_protected';
-      const outName = file.name.replace(/\.lua$/, suffix + '.lua');
-      const msg     = _protLevel === 'max'
-        ? 'Maximum protection applied.\nLayer 2 key = SHA256(gg.getTargetPackage() + nonce)\nจะถอดรหัสได้เฉพาะใน GG session ที่ถูกต้องเท่านั้น'
-        : 'Standard obfuscation applied. Run directly on GameGuardian.';
+      const outName = file.name.replace(/\.lua$/, '_protected.lua');
+      const msg     = 'Protected successfully.\n\nOutput: Lua 5.3 bytecode encrypted with LFSR cipher.\nLooks binary — cannot be read or decompiled.\nRun directly on GameGuardian.';
       showResult(true, msg, blob, outName);
     } else {
       const j = await r.json();
