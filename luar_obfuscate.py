@@ -1,25 +1,26 @@
 """
-LuaR Obfuscate v5 — Binary-looking Lua output
+LuaR Obfuscate v6 — Triple-stage, GG-keyed, stripped, no 'load' keyword
 
-Pipeline:
-  1. User .lua → luac5.3 → Lua 5.3 bytecode (payload)
-  2. LFSR encrypt payload, anti-tamper FNV seed hiding
-  3. Full loader (Lua source) → luac5.3 → stage-2 bytecode
-  4. Stage-2 bytecode → table of string.char() chunks
-  5. Output: single-line Lua script that looks like binary garbage
+Design:
+  encrypt seed = FNV(nonce_bytes)       [Python, stored implicitly via nonce]
+  decrypt seed = FNV(pkg_bytes+nonce)   [Lua runtime via gg.getTargetPackage()]
+  
+  เมื่อ pkg='' (นอก GG):  seed = FNV(nonce_bytes) = encrypt seed → decrypt ได้ [dev/test]
+  เมื่อ pkg='com.ea...' (ใน GG):  seed = FNV(pkg+nonce) ≠ encrypt seed → decrypt ผิด
+  
+  → ในการใช้งานจริง: ต้องรู้ package name ของเกมที่ target จึงจะถอดได้
 
-Output format:
-  local _t={} _t[1]=string.char(27,76,117,97,83,...) _t[2]=... load(table.concat(_t))()
-
-The file starts with 27,76,117,97,83 = 0x1b,L,u,a,S = Lua 5.3 bytecode magic
-Visually indistinguishable from binary .lua files like SCBI.
+Anti-keyword:
+  ไม่มีคำว่า 'load' ปรากฏในไฟล์ output เลย
+  ใช้ string.char(108,111,97,100) แทน 'load'
+  ใช้ string.char(116,97,98,108,101) แทน 'table'
 """
 
 import os, random, struct, subprocess, tempfile
 
-TAPS = 0x80200003  # 32-bit Galois LFSR taps
+TAPS = 0x80200003
 
-# ─── LFSR stream cipher (bijective) ──────────────────────────────────────────
+# ─── Cipher ───────────────────────────────────────────────────────────────────
 def _lfsr_enc(data: bytes, seed: int) -> bytes:
     st = (seed & 0xFFFFFFFF) or 1
     out = []
@@ -29,159 +30,106 @@ def _lfsr_enc(data: bytes, seed: int) -> bytes:
         out.append((b + (st & 0xFF)) & 0xFF)
     return bytes(out)
 
-def _lfsr_dec_verify(enc: bytes, seed: int) -> bytes:
-    st = (seed & 0xFFFFFFFF) or 1
-    out = []
-    for b in enc:
-        lsb = st & 1
-        st = ((st >> 1) ^ (TAPS if lsb else 0)) & 0xFFFFFFFF
-        out.append((b - (st & 0xFF)) & 0xFF)
-    return bytes(out)
-
-# ─── FNV-1a 32-bit ───────────────────────────────────────────────────────────
 def _fnv32(data: bytes) -> int:
     h = 2166136261
     for b in data:
         h = ((h ^ b) * 16777619) & 0xFFFFFFFF
-    return h
+    return h & 0xFFFFFFFF or 1
 
-# ─── luac helper ─────────────────────────────────────────────────────────────
+# ─── luac ─────────────────────────────────────────────────────────────────────
 def _find_luac():
     import shutil
     for c in ["luac5.3", "luac5.4", "luac"]:
-        path = shutil.which(c)
-        if path:
-            return path
+        p = shutil.which(c)
+        if p: return p
     return None
 
-def _compile(lua_source: bytes, luac: str) -> bytes:
-    """Compile Lua source to bytecode. Returns source unchanged on failure."""
+def _compile(src: bytes, luac: str, strip=True) -> bytes:
     with tempfile.NamedTemporaryFile(suffix=".lua", delete=False) as f:
-        f.write(lua_source)
-        sp = f.name
+        f.write(src); sp = f.name
     op = sp + "c"
     try:
-        r = subprocess.run([luac, "-o", op, sp], capture_output=True, timeout=15)
-        if r.returncode != 0:
-            return lua_source  # syntax error — use source
+        args = [luac] + (["-s"] if strip else []) + ["-o", op, sp]
+        r = subprocess.run(args, capture_output=True, timeout=15)
+        if r.returncode != 0: return src
         return open(op, "rb").read()
-    except Exception:
-        return lua_source
+    except Exception: return src
     finally:
         for p in [sp, op]:
             try: os.unlink(p)
             except: pass
 
-def _is_bytecode(data: bytes) -> bool:
-    return data[:3] in (b'\x1bLu', b'\x1bLJ')
+def _is_bc(d: bytes) -> bool:
+    return d[:3] in (b'\x1bLu', b'\x1bLJ')
 
-# ─── Name mangler ─────────────────────────────────────────────────────────────
-def _make_namer(seed_int):
-    rng = random.Random(seed_int)
-    used = set()
-    POOL = "lI10OoQ"
+# ─── Names ────────────────────────────────────────────────────────────────────
+def _namer(seed):
+    rng = random.Random(seed); used = set()
     def name():
         while True:
-            n = "_" * rng.randint(1, 3) + "".join(rng.choice(POOL) for _ in range(rng.randint(5, 9)))
-            if n not in used:
-                used.add(n)
-                return n
+            n = "_"*rng.randint(1,3)+"".join(rng.choice("lI10OoQ") for _ in range(rng.randint(5,9)))
+            if n not in used: used.add(n); return n
     return name
 
-# ─── Opaque predicates ───────────────────────────────────────────────────────
-def _op_true(rng, N):
-    n = rng.randint(100, 9999)
-    vn = N()
-    return f"local {vn}={n}", f"(({vn}*({vn}+1))%2==0)"
+def _dead(rng, N, ind=""):
+    vn=N(); vd=N(); n=rng.randint(1,999)
+    return f"{ind}local {vn}={n} if(({vn}*{vn})<0)then local {vd}={rng.randint(10,9999)} {vd}={vd}*{rng.randint(2,99)} end"
 
-def _op_false(rng, N):
-    n = rng.randint(1, 999)
-    vn = N()
-    return f"local {vn}={n}", f"(({vn}*{vn})<0)"
+# ─── String literal encoder (hides keywords) ──────────────────────────────────
+def _hide_str(s: str) -> str:
+    """แปลง string literal เป็น string.char() เพื่อซ่อน keyword"""
+    nums = ",".join(str(ord(c)) for c in s)
+    return f"string.char({nums})"
 
-def _dead(rng, N):
-    setup_f, cond_f = _op_false(rng, N)
-    vd = N()
-    return f"{setup_f} if {cond_f} then local {vd}={rng.randint(10,9999)} {vd}={vd}*{rng.randint(2,99)} end"
-
-# ─── Generate inner loader Lua source ────────────────────────────────────────
-def _make_loader(enc: bytes, stored_seed: int, rng: random.Random) -> bytes:
-    """
-    Produce Lua source that:
-      1. Reassembles encrypted chunks (in shuffled order)
-      2. Recovers cipher seed via FNV checksum (anti-tamper)
-      3. LFSR-decrypts to original bytecode
-      4. Calls load() and runs it
-    This source is then compiled to bytecode (stage-2).
-    """
-    N = _make_namer(rng.randint(0, 0xFFFFFFFF))
-
-    # Chunk + shuffle encrypted data
-    CHUNK = rng.randint(200, 350)
-    chunks = [enc[i:i+CHUNK] for i in range(0, len(enc), CHUNK)]
+# ─── Inner loader (Lua source → compiled bytecode) ────────────────────────────
+def _make_inner(enc: bytes, nonce: int, rng: random.Random) -> bytes:
+    N = _namer(rng.randint(0,0xFFFFFFFF))
+    CHUNK = rng.randint(180,300)
+    chunks = [enc[i:i+CHUNK] for i in range(0,len(enc),CHUNK)]
     nc = len(chunks)
+    order = list(range(nc)); rng.shuffle(order)
+    inv = [0]*nc
+    for si,oi in enumerate(order): inv[oi]=si
 
-    order = list(range(nc))
-    rng.shuffle(order)
-    inv = [0] * nc
-    for si, oi in enumerate(order):
-        inv[oi] = si
+    vC=[N() for _ in range(nc)]
+    vT=N(); vV=N(); vB=N(); vH=N(); vS=N(); vSt=N(); vO=N(); vF=N(); vI=N(); vPk=N()
 
-    # Variable names
-    vC  = [N() for _ in range(nc)]  # chunk vars (shuffled order)
-    vT  = N()   # chunk pointer table
-    vV  = N()   # inverse perm
-    vB  = N()   # reassembled buffer
-    vH  = N()   # FNV hash
-    vS  = N()   # cipher seed
-    vSt = N()   # LFSR state
-    vO  = N()   # output chars
-    vF  = N()   # loaded fn
-    vI  = N()   # loop var
+    nonce_bytes = [(nonce>>(8*i))&0xFF for i in range(4)]
 
-    L = []
+    L=[]
+    n_op=rng.randint(100,9999); vop=N()
+    L.append(f"local {vop}={n_op} if(({vop}*({vop}+1))%2==0)then")
+    L.append("  "+_dead(rng,N))
 
-    # Outer always-true opaque predicate
-    s_t, c_t = _op_true(rng, N)
-    L.append(s_t)
-    L.append(f"if {c_t} then")
-
-    # Dead code
-    L.append("  " + _dead(rng, N))
-
-    # Chunk vars in shuffled order (vC[si] holds chunks[order[si]])
     for si in range(nc):
-        oi = order[si]
-        nums = ",".join(str(b) for b in chunks[oi])
+        nums=",".join(str(b) for b in chunks[order[si]])
         L.append(f"  local {vC[si]}={{{nums}}}")
 
-    L.append("  " + _dead(rng, N))
-
-    # Inverse permutation table (0-based)
+    L.append("  "+_dead(rng,N))
     L.append(f"  local {vV}={{{','.join(str(x) for x in inv)}}}")
-
-    # Pointer table: vT[si+1] = vC[si]  (Lua 1-based)
-    tbl = ",".join(vC[si] for si in range(nc))
-    L.append(f"  local {vT}={{{tbl}}}")
-
-    # Reassemble in original order: iterate oi=1..nc, get si=inv[oi], read vT[si+1]
+    L.append(f"  local {vT}={{{','.join(vC[si] for si in range(nc))}}}")
     L.append(f"  local {vB}={{}}")
     L.append(f"  local {vI}=0")
     L.append(f"  for _oi=1,{nc} do")
-    L.append(f"    local _si={vV}[_oi]")
-    L.append(f"    local _ch={vT}[_si+1]")
+    L.append(f"    local _ch={vT}[{vV}[_oi]+1]")
     L.append(f"    for _j=1,#_ch do {vI}={vI}+1 {vB}[{vI}]=_ch[_j] end")
     L.append(f"  end")
 
-    # FNV-1a checksum to recover seed
-    L.append(f"  local {vH}=2166136261")
-    L.append(f"  for {vI}=1,#{vB} do")
-    L.append(f"    {vH}=({vH}~{vB}[{vI}])*16777619&0xFFFFFFFF")
+    # GG binding: seed = FNV(pkg_bytes + nonce_bytes)
+    # pkg = '' นอก GG → seed = FNV(nonce_bytes) = Python encrypt seed ✓
+    # pkg = 'com.xxx' ใน GG → seed ≠ encrypt seed → decrypt ผิด ✓
+    L.append(f"  local {vPk}=''")
+    L.append(f"  if gg then")
+    L.append(f"    local _ok,_r=pcall(function()return gg.getTargetPackage()end)")
+    L.append(f"    if _ok and _r then {vPk}=tostring(_r) end")
     L.append(f"  end")
-    L.append(f"  local {vS}=({stored_seed}~{vH})&0xFFFFFFFF")
+    L.append(f"  local {vH}=2166136261")
+    L.append(f"  for _i=1,#{vPk} do {vH}=({vH}~{vPk}:byte(_i))*16777619&0xFFFFFFFF end")
+    nc_str = ",".join(str(b) for b in nonce_bytes)
+    L.append(f"  for _,_b in ipairs({{{nc_str}}}) do {vH}=({vH}~_b)*16777619&0xFFFFFFFF end")
+    L.append(f"  local {vS}={vH}&0xFFFFFFFF")
     L.append(f"  if {vS}==0 then {vS}=1 end")
-
-    L.append("  " + _dead(rng, N))
+    L.append("  "+_dead(rng,N))
 
     # LFSR decrypt
     L.append(f"  local {vSt}={vS}")
@@ -193,69 +141,69 @@ def _make_loader(enc: bytes, stored_seed: int, rng: random.Random) -> bytes:
     L.append(f"    {vO}[{vI}]=string.char(({vB}[{vI}]-({vSt}&255))&255)")
     L.append(f"  end")
 
-    # Load and run
-    L.append(f"  local {vF}=load(table.concat({vO}))")
+    # ซ่อน 'load' และ 'table' ด้วย rawget + _ENV
+    vRL=N(); vRT=N()
+    # 'load' = char(108,111,97,100)  'table' = char(116,97,98,108,101)
+    L.append(f"  local {vRL}=rawget(_ENV,{_hide_str('load')})")
+    L.append(f"  local {vRT}=rawget(_ENV,{_hide_str('table')})")
+    L.append(f"  local {vF}={vRL}({vRT}.concat({vO}))")
     L.append(f"  if {vF} then {vF}() end")
     L.append(f"end")
 
     return "\n".join(L).encode("utf-8")
 
-# ─── Encode bytes as Lua bootstrap (single line, table of string.char) ───────
-def _encode_as_bootstrap(bc: bytes) -> str:
-    """
-    Encode bytecode as:
-      local _t={} _t[1]=string.char(N,...) _t[2]=... load(table.concat(_t))()
-    All on one line. Looks like binary garbage.
-    string.char() is limited to ~250 args in Lua, so we chunk at 200.
-    """
-    LIMIT = 200
-    parts = ["local _t={}"]
-    for i, start in enumerate(range(0, len(bc), LIMIT)):
-        chunk = bc[start:start+LIMIT]
-        nums = ",".join(str(b) for b in chunk)
+# ─── Outer loader ─────────────────────────────────────────────────────────────
+def _make_outer(loader_bc: bytes, rng: random.Random) -> bytes:
+    N = _namer(rng.randint(0,0xFFFFFFFF))
+    vT=N(); vRL=N(); vRT=N()
+    LIMIT=200
+    parts=[f"local {vT}={{}}"]
+    for i,start in enumerate(range(0,len(loader_bc),LIMIT)):
+        chunk=loader_bc[start:start+LIMIT]
+        nums=",".join(str(b) for b in chunk)
+        parts.append(f"{vT}[{i+1}]=string.char({nums})")
+    parts.append(f"local {vRL}=rawget(_ENV,{_hide_str('load')})")
+    parts.append(f"local {vRT}=rawget(_ENV,{_hide_str('table')})")
+    parts.append(f"{vRL}({vRT}.concat({vT}))()")
+    return (" ".join(parts)).encode("utf-8")
+
+# ─── Bootstrap ────────────────────────────────────────────────────────────────
+def _bootstrap(outer_bc: bytes) -> str:
+    LIMIT=200
+    if len(outer_bc)<=LIMIT:
+        nums=",".join(str(b) for b in outer_bc)
+        return f"rawget(_ENV,{_hide_str('load')})(string.char({nums}))()"
+    parts=["local _t={}"]
+    for i,start in enumerate(range(0,len(outer_bc),LIMIT)):
+        chunk=outer_bc[start:start+LIMIT]
+        nums=",".join(str(b) for b in chunk)
         parts.append(f"_t[{i+1}]=string.char({nums})")
-    parts.append("load(table.concat(_t))()")
+    parts.append(f"rawget(_ENV,{_hide_str('load')})(rawget(_ENV,{_hide_str('table')}).concat(_t))()")
     return " ".join(parts)
 
-# ─── Main entry point ─────────────────────────────────────────────────────────
+# ─── Main ─────────────────────────────────────────────────────────────────────
 def obfuscate_bytecode(lua_source: bytes) -> bytes:
-    """
-    Input:  Lua source text OR already-compiled bytecode
-    Output: Single-line Lua script that looks like binary garbage.
-            Starts with Lua 5.3 bytecode magic bytes (27,76,117,97,83,...).
-            Runs correctly on GameGuardian (Lua 5.3+).
-    """
     rng  = random.Random(struct.unpack(">Q", os.urandom(8))[0])
     luac = _find_luac()
 
-    # ── Step 1: Compile user script to bytecode ──────────────────────────────
-    if _is_bytecode(lua_source):
-        payload_bc = lua_source
-    elif luac:
-        payload_bc = _compile(lua_source, luac)
-    else:
-        payload_bc = lua_source  # no luac — use source as payload
+    # Compile user script
+    if _is_bc(lua_source): payload_bc = lua_source
+    elif luac:             payload_bc = _compile(lua_source, luac, strip=True)
+    else:                  payload_bc = lua_source
 
-    # ── Step 2: LFSR-encrypt payload bytecode ────────────────────────────────
-    raw_seed = struct.unpack(">I", os.urandom(4))[0] or 0xDEADBEEF
-    enc = _lfsr_enc(payload_bc, raw_seed)
-    assert _lfsr_dec_verify(enc, raw_seed) == payload_bc, "LFSR verify failed"
+    # nonce + encrypt (seed = FNV(nonce_bytes) เมื่อ pkg='')
+    nonce = struct.unpack(">I", os.urandom(4))[0] & 0xFFFFFFFF
+    nonce_bytes = bytes([(nonce>>(8*i))&0xFF for i in range(4)])
+    seed = _fnv32(nonce_bytes)
+    enc = _lfsr_enc(payload_bc, seed)
 
-    # ── Step 3: Anti-tamper — hide seed behind FNV checksum ─────────────────
-    stored_seed = (raw_seed ^ _fnv32(enc)) & 0xFFFFFFFF
+    # Triple compile (all stripped)
+    inner_src = _make_inner(enc, nonce, rng)
+    loader_bc = _compile(inner_src, luac, strip=True) if luac else inner_src
+    if not _is_bc(loader_bc): loader_bc = inner_src
 
-    # ── Step 4: Generate inner loader Lua source ─────────────────────────────
-    loader_src = _make_loader(enc, stored_seed, rng)
+    outer_src = _make_outer(loader_bc, rng)
+    outer_bc  = _compile(outer_src, luac, strip=True) if luac else outer_src
+    if not _is_bc(outer_bc): outer_bc = outer_src
 
-    # ── Step 5: Compile loader to bytecode (stage-2) ─────────────────────────
-    if luac:
-        loader_bc = _compile(loader_src, luac)
-        if not _is_bytecode(loader_bc):
-            # Compilation failed somehow — use source as fallback
-            loader_bc = loader_src
-    else:
-        loader_bc = loader_src
-
-    # ── Step 6: Encode as single-line bootstrap ──────────────────────────────
-    bootstrap = _encode_as_bootstrap(loader_bc)
-    return bootstrap.encode("utf-8")
+    return _bootstrap(outer_bc).encode("utf-8")
