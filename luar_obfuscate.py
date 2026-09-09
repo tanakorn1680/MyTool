@@ -47,10 +47,11 @@ def _fnv32(data: bytes) -> int:
 
 # ─── luac helper ─────────────────────────────────────────────────────────────
 def _find_luac():
+    import shutil
     for c in ["luac5.3", "luac5.4", "luac"]:
-        r = subprocess.run(["which", c], capture_output=True)
-        if r.returncode == 0:
-            return c.strip()
+        path = shutil.which(c)
+        if path:
+            return path
     return None
 
 def _compile(lua_source: bytes, luac: str) -> bytes:
