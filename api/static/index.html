@@ -224,6 +224,52 @@ footer {
 
 footer code { font-family: var(--mono); color: var(--accent2); }
 footer .sep { margin: 0 0.4rem; opacity: 0.4; }
+
+/* ── Protection Level Selector ── */
+.level-group {
+  display: flex;
+  gap: 0.5rem;
+  margin: 1rem 0 0;
+}
+.level-btn {
+  flex: 1;
+  padding: 0.55rem 0.5rem;
+  border-radius: var(--radius);
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: center;
+}
+.level-btn:hover { border-color: var(--accent); color: var(--text); }
+.level-btn.active {
+  border-color: var(--accent);
+  background: rgba(124,106,247,0.15);
+  color: var(--text);
+}
+.level-badge {
+  display: inline-block;
+  font-size: 0.65rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  margin-left: 0.25rem;
+  vertical-align: middle;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.badge-std  { background: rgba(91,196,245,0.2); color: var(--accent2); }
+.badge-max  { background: rgba(255,100,100,0.2); color: #f87171; }
+.level-desc {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin: 0.4rem 0 0;
+  min-height: 2.5em;
+  line-height: 1.4;
+}
+
 </style>
 </head>
 <body>
@@ -246,6 +292,22 @@ footer .sep { margin: 0 0.4rem; opacity: 0.4; }
     </div>
   </div>
 
+
+  <div class="field" style="margin-top:1rem">
+    <label>ระดับการป้องกัน</label>
+    <div class="level-group">
+      <div class="level-btn active" id="lv-std" onclick="setLevel('standard')">
+        🔒 Standard <span class="level-badge badge-std">v1</span>
+      </div>
+      <div class="level-btn" id="lv-max" onclick="setLevel('max')">
+        🔐 Maximum <span class="level-badge badge-max">v3</span>
+      </div>
+    </div>
+    <div class="level-desc" id="level-desc">
+      Fibonacci XOR + chunk shuffle + variable mangling — ถอดยากสำหรับคนทั่วไป
+    </div>
+  </div>
+
   <button class="btn-primary" id="btn-protect" onclick="doProtect()">
     <span class="spinner" id="spin-protect"></span>
     <span id="lbl-protect">🔒 Protect</span>
@@ -255,11 +317,7 @@ footer .sep { margin: 0 0.4rem; opacity: 0.4; }
 </div>
 
 <footer>
-  Rolling XOR + Chunk Shuffle
-  <span class="sep">·</span>
-  Variable Mangling
-  <span class="sep">·</span>
-  LuaR Obfuscator
+  Standard: XOR + Shuffle · Maximum: RC4 + SHA256 + GG-keyed · LuaR Obfuscator
 </footer>
 
 <script>
@@ -337,6 +395,20 @@ function esc(s) {
     .replace(/>/g, '&gt;');
 }
 
+
+// ── Protection level ───────────────────────────────────────────────────────
+let _protLevel = 'standard';
+const _levelDesc = {
+  standard: 'Fibonacci XOR + chunk shuffle + variable mangling — ถอดยากสำหรับคนทั่วไป',
+  max: 'RC4 + SHA-256 + 2-layer encryption · Layer 2 ต้องรู้ package name จาก GG · ไม่มี load(plaintext) — ยากมากสำหรับทุกคน'
+};
+function setLevel(lv) {
+  _protLevel = lv;
+  document.getElementById('lv-std').classList.toggle('active', lv === 'standard');
+  document.getElementById('lv-max').classList.toggle('active', lv === 'max');
+  document.getElementById('level-desc').textContent = _levelDesc[lv];
+}
+
 // ── Protect ────────────────────────────────────────────────────────────────
 async function doProtect() {
   const file = document.getElementById('file-protect').files[0];
@@ -346,6 +418,7 @@ async function doProtect() {
   try {
     const fd = new FormData();
     fd.append('file', file);
+    fd.append('level', _protLevel);
 
     const r = await fetch('/api/index', {
       method: 'POST',
@@ -355,8 +428,12 @@ async function doProtect() {
 
     if (r.ok) {
       const blob    = await r.blob();
-      const outName = file.name.replace(/\.lua$/, '_ob.lua');
-      showResult(true, 'Obfuscated successfully. Run directly on GameGuardian.', blob, outName);
+      const suffix  = _protLevel === 'max' ? '_protected_max' : '_protected';
+      const outName = file.name.replace(/\.lua$/, suffix + '.lua');
+      const msg     = _protLevel === 'max'
+        ? 'Maximum protection applied.\nLayer 2 key = SHA256(gg.getTargetPackage() + nonce)\nจะถอดรหัสได้เฉพาะใน GG session ที่ถูกต้องเท่านั้น'
+        : 'Standard obfuscation applied. Run directly on GameGuardian.';
+      showResult(true, msg, blob, outName);
     } else {
       const j = await r.json();
       showResult(false, j.error || 'Unknown error.');

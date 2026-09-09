@@ -1,11 +1,13 @@
 import sys, io
 from pathlib import Path
 
-ROOT = Path(__file__).parent.parent
+ROOT = Path(__file__).parent.parent if (Path(__file__).parent.parent / "luar_obfuscate.py").exists() \
+       else Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
 from flask import Flask, request, send_file, jsonify
 from luar_obfuscate import obfuscate_bytecode
+from luar_obfuscate_v3 import obfuscate_bytecode_v3
 
 STATIC = Path(__file__).parent / "static"
 app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
@@ -20,19 +22,27 @@ def _do_protect():
     if len(raw) == 0:
         return jsonify(error="File is empty."), 400
 
+    # Protection level: "standard" (v1) or "max" (v3, GG-keyed)
+    level = request.form.get("level", "standard")
+
     try:
-        result = obfuscate_bytecode(raw)
+        if level == "max":
+            result = obfuscate_bytecode_v3(raw)
+            suffix = "_protected_max"
+        else:
+            result = obfuscate_bytecode(raw)
+            suffix = "_protected"
     except Exception as e:
-        return jsonify(error=f"Obfuscation error: {e}"), 400
+        return jsonify(error=f"Protection error: {e}"), 400
 
     stem = Path(f.filename).stem if f.filename else "protected"
     resp = send_file(
         io.BytesIO(result),
         mimetype="application/octet-stream",
         as_attachment=True,
-        download_name=stem + ".lua",
+        download_name=stem + suffix + ".lua",
     )
-    resp.headers["Content-Disposition"] = f'attachment; filename="{stem}.lua"'
+    resp.headers["Content-Disposition"] = f'attachment; filename="{stem}{suffix}.lua"'
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -65,7 +75,6 @@ def _dispatch():
         return jsonify(error=str(e)), 500
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
 @app.route("/api/protect", methods=["POST"])
 def protect():
     try:
