@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LuaR Protector</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:      #0f1117;
+  --surface: #1a1d27;
+  --border:  #2a2d3a;
+  --accent:  #7c6af7;
+  --accent2: #5bc4f5;
+  --text:    #e2e4f0;
+  --muted:   #6b7280;
+  --ok:      #34d399;
+  --err:     #f87171;
+  --mono:    "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+  --sans:    system-ui, -apple-system, sans-serif;
+  --radius:  8px;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 2.5rem 1rem 5rem;
+}
+
+/* ── Header ── */
+header { text-align: center; margin-bottom: 2rem; }
+
+header h1 {
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent2) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+header p { color: var(--muted); margin-top: 0.4rem; font-size: 0.875rem; }
+
+/* ── Card ── */
+.card {
+  width: 100%;
+  max-width: 560px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1.75rem;
+}
+
+/* ── Field ── */
+.field { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 1.1rem; }
+
+label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+/* ── Dropzone ── */
+.dropzone {
+  position: relative;
+  border: 1.5px dashed var(--border);
+  border-radius: 10px;
+  padding: 1.5rem 1rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.dropzone:hover, .dropzone.over {
+  border-color: var(--accent);
+  background: rgba(124, 106, 247, 0.05);
+}
+
+.dropzone input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+}
+
+.dz-icon { font-size: 1.75rem; margin-bottom: 0.4rem; }
+.dz-text { color: var(--muted); font-size: 0.85rem; }
+.dz-filename {
+  color: var(--accent2);
+  font-size: 0.82rem;
+  font-family: var(--mono);
+  margin-top: 0.35rem;
+  min-height: 1.1em;
+}
+
+/* ── Button ── */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  background: linear-gradient(135deg, var(--accent) 0%, #5f52c9 100%);
+  color: #fff;
+  border: none;
+  border-radius: 9px;
+  padding: 0.7rem 1.4rem;
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.1s;
+}
+
+.btn-primary:hover  { opacity: 0.88; }
+.btn-primary:active { transform: scale(0.97); }
+.btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Spinner ── */
+.spinner {
+  display: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Result box ── */
+.result {
+  display: none;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem 1.1rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.18);
+  margin-top: 1.1rem;
+}
+
+.result.visible { display: flex; }
+.result.ok  { border-color: rgba(52,  211, 153, 0.35); }
+.result.err { border-color: rgba(248, 113, 113, 0.35); }
+
+.result-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.dot.ok  { background: var(--ok); }
+.dot.err { background: var(--err); }
+
+.result pre {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.result.err pre { color: var(--err); }
+
+/* ── Download button ── */
+.dl-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 1px solid rgba(91, 196, 245, 0.35);
+  background: rgba(91, 196, 245, 0.08);
+  color: var(--accent2);
+  border-radius: var(--radius);
+  padding: 0.5rem 1rem;
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  width: fit-content;
+  transition: background 0.15s;
+}
+
+.dl-btn:hover { background: rgba(91, 196, 245, 0.18); }
+
+/* ── Badge ── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.7rem;
+  color: var(--ok);
+  border: 1px solid rgba(52, 211, 153, 0.25);
+  border-radius: 20px;
+  padding: 0.2rem 0.6rem;
+  margin-bottom: 1.2rem;
+  background: rgba(52, 211, 153, 0.07);
+}
+
+/* ── Footer ── */
+footer {
+  margin-top: 2.5rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-align: center;
+  line-height: 1.8;
+}
+
+footer code { font-family: var(--mono); color: var(--accent2); }
+footer .sep { margin: 0 0.4rem; opacity: 0.4; }
+
+/* ── Protection Level Selector ── */
+.level-group {
+  display: flex;
+  gap: 0.5rem;
+  margin: 1rem 0 0;
+}
+.level-btn {
+  flex: 1;
+  padding: 0.55rem 0.5rem;
+  border-radius: var(--radius);
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: center;
+}
+.level-btn:hover { border-color: var(--accent); color: var(--text); }
+.level-btn.active {
+  border-color: var(--accent);
+  background: rgba(124,106,247,0.15);
+  color: var(--text);
+}
+.level-badge {
+  display: inline-block;
+  font-size: 0.65rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  margin-left: 0.25rem;
+  vertical-align: middle;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.badge-std  { background: rgba(91,196,245,0.2); color: var(--accent2); }
+.badge-max  { background: rgba(255,100,100,0.2); color: #f87171; }
+.level-desc {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin: 0.4rem 0 0;
+  min-height: 2.5em;
+  line-height: 1.4;
+}
+
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⟨ LuaR ⟩</h1>
+  <p>Lua Script Protector</p>
+</header>
+
+<div class="card">
+  <div class="badge">🛡️ Lua Bytecode Protection · GG compatible</div>
+
+  <div class="field">
+    <label for="file-protect">Lua Script (.lua)</label>
+    <div class="dropzone" id="dz-protect">
+      <input type="file" id="file-protect" accept=".lua">
+      <div class="dz-icon">📄</div>
+      <div class="dz-text">Drop your .lua script here</div>
+      <div class="dz-filename" id="name-protect"></div>
+    </div>
+  </div>
+    <div class="level-desc" id="level-desc">
+      Fibonacci XOR + chunk shuffle + variable mangling — ถอดยากสำหรับคนทั่วไป
+    </div>
+  </div>
+
+  <button class="btn-primary" id="btn-protect" onclick="doProtect()">
+    <span class="spinner" id="spin-protect"></span>
+    <span id="lbl-protect">🔒 Protect</span>
+  </button>
+
+  <div class="result" id="res-protect"></div>
+</div>
+
+<footer>
+  LFSR Cipher + FNV Anti-tamper + Two-stage Bytecode · LuaR Obfuscator v5
+</footer>
+
+<script>
+// ── Dropzone setup ─────────────────────────────────────────────────────────
+function setupDZ(dzId, inputId, nameId, ext) {
+  const dz    = document.getElementById(dzId);
+  const input = document.getElementById(inputId);
+  const name  = document.getElementById(nameId);
+
+  input.addEventListener('change', () => {
+    if (input.files[0]) name.textContent = input.files[0].name;
+  });
+
+  dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('over'); });
+  dz.addEventListener('dragleave', ()  => dz.classList.remove('over'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault();
+    dz.classList.remove('over');
+    const file = e.dataTransfer.files[0];
+    if (!file || !file.name.endsWith(ext)) return;
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    input.files = dt.files;
+    name.textContent = file.name;
+  });
+}
+
+setupDZ('dz-protect', 'file-protect', 'name-protect', '.lua');
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function setLoading(loading) {
+  const btn  = document.getElementById('btn-protect');
+  const spin = document.getElementById('spin-protect');
+  const lbl  = document.getElementById('lbl-protect');
+  btn.disabled       = loading;
+  spin.style.display = loading ? 'inline-block' : 'none';
+  lbl.textContent    = loading ? 'Processing…' : '🔒 Protect';
+}
+
+function showResult(ok, msg, dlBlob, dlName) {
+  const el = document.getElementById('res-protect');
+  el.className = 'result visible ' + (ok ? 'ok' : 'err');
+
+  const title = ok ? (dlBlob ? 'Protected' : 'Success') : 'Error';
+  let html = `<div class="result-header">
+    <div class="dot ${ok ? 'ok' : 'err'}"></div>${title}
+  </div>`;
+
+  if (msg) html += `<pre>${esc(msg)}</pre>`;
+
+  // ปุ่ม Download — ใช้ id เพื่อ attach blob หลัง render
+  if (dlBlob) html += `<button class="dl-btn" id="dl-btn">⬇ Download ${esc(dlName)}</button>`;
+
+  el.innerHTML = html;
+
+  if (dlBlob) {
+    document.getElementById('dl-btn').addEventListener('click', () => {
+      // programmatic download — ทำงานได้บน Android Chrome
+      const url = URL.createObjectURL(dlBlob);
+      const a   = document.createElement('a');
+      a.href     = url;
+      a.download = dlName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    });
+  }
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+
+// ── Protect ────────────────────────────────────────────────────────────────
+async function doProtect() {
+  const file = document.getElementById('file-protect').files[0];
+  if (!file) return showResult(false, 'No file selected.');
+
+  setLoading(true);
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+
+    const r = await fetch('/api/index', {
+      method: 'POST',
+      body: fd,
+      headers: { 'X-Original-URL': '/api/protect' }
+    });
+
+    if (r.ok) {
+      const blob    = await r.blob();
+      const outName = file.name.replace(/\.lua$/, '_protected.lua');
+      const msg     = 'Protected successfully.\n\nOutput: Lua 5.3 bytecode encrypted with LFSR cipher.\nLooks binary — cannot be read or decompiled.\nRun directly on GameGuardian.';
+      showResult(true, msg, blob, outName);
+    } else {
+      const j = await r.json();
+      showResult(false, j.error || 'Unknown error.');
+    }
+  } catch (e) {
+    showResult(false, e.message);
+  } finally {
+    setLoading(false);
+  }
+}
+</script>
+</body>
+</html>
